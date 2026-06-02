@@ -167,6 +167,13 @@ header h1 {
 .step:active { transform: scale(0.92); }
 .step:disabled { opacity: 0.35; cursor: not-allowed; }
 
+.eta {
+  text-align: center;
+  margin: 0 0 4px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 .toggles {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

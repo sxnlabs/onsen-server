@@ -36,6 +36,10 @@
             {% if st.preset_temp >= 40 %}disabled{% endif %} aria-label="{{ t('panel.raise_setpoint') }}">+</button>
   </div>
 
+  {% if eta %}
+  <p class="eta">⏱️ {% if eta.over_cap %}{{ t('panel.eta_slow') }}{% else %}{{ t('panel.eta_ready', at=eta.at, dur=eta.label) }}{% endif %}</p>
+  {% endif %}
+
   <div class="toggles">
     {% for field, label_key, emoji in ui_toggles %}
     <button class="toggle {% if st[field] %}on{% endif %}"

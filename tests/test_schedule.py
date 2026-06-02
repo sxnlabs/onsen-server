@@ -238,3 +238,41 @@ def test_next_preheat_reports_start_and_lead():
     assert p["temp"] == 36 and p["time"] == "18:00"
     assert p["lead_h"] == 12.0 and p["start"] == "06:00"
     assert p["active"] is True
+
+
+# -- eta_to_setpoint ----------------------------------------------------------
+def test_eta_basic_same_day():
+    eta = S.eta_to_setpoint(at(8), current_temp=30, target_temp=35, rate=1.0)
+    assert eta["minutes"] == 300        # 5 °C at 1 °C/h
+    assert eta["hours"] == 5.0
+    assert eta["at"] == "13:00"         # 08:00 + 5 h, still Monday
+    assert eta["label"] == "5 h"
+    assert eta["over_cap"] is False
+
+
+def test_eta_fractional_label():
+    eta = S.eta_to_setpoint(at(8), current_temp=33, target_temp=35, rate=1.5)
+    assert eta["minutes"] == 80         # 2 °C / 1.5 °C/h = 1h20
+    assert eta["label"] == "1 h 20"
+
+
+def test_eta_none_when_at_or_above_target():
+    assert S.eta_to_setpoint(at(8), 35, 35, 1.0) is None
+    assert S.eta_to_setpoint(at(8), 36, 35, 1.0) is None
+
+
+def test_eta_none_on_missing_or_zero_inputs():
+    assert S.eta_to_setpoint(at(8), None, 35, 1.0) is None
+    assert S.eta_to_setpoint(at(8), 30, None, 1.0) is None
+    assert S.eta_to_setpoint(at(8), 30, 35, 0) is None
+    assert S.eta_to_setpoint(at(8), 30, 35, None) is None
+
+
+def test_eta_over_cap_flag_for_cold_crawl():
+    eta = S.eta_to_setpoint(at(8), current_temp=15, target_temp=35, rate=0.5)
+    assert eta["over_cap"] is True      # 20 °C / 0.5 = 40 h > MAX_PREHEAT_HOURS
+
+
+def test_eta_prefixes_weekday_when_next_day():
+    eta = S.eta_to_setpoint(at(22), current_temp=30, target_temp=35, rate=1.0)
+    assert eta["at"].startswith("Tue ")  # 22:00 + 5 h = 03:00 next day

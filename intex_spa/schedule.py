@@ -334,6 +334,43 @@ def effective_heat_rate(points: list[dict], air: float | None, *,
     return rate, explain
 
 
+def _fmt_duration(minutes: int) -> str:
+    """Compact, language-neutral duration: '45 min', '1 h', '1 h 20'."""
+    if minutes < 60:
+        return f"{minutes} min"
+    h, m = divmod(minutes, 60)
+    return f"{h} h" if m == 0 else f"{h} h {m:02d}"
+
+
+def eta_to_setpoint(
+    now: datetime, current_temp: int | None, target_temp: int | None, rate: float | None
+):
+    """Pure: estimate when the water reaches `target_temp` climbing at `rate` °C/h.
+
+    Returns a dict {at, label, minutes, hours, over_cap} for the UI, or None when
+    there's nothing to predict (no reading, already at/above target, no positive
+    rate). `over_cap` flags an estimate beyond MAX_PREHEAT_HOURS — a cold-weather
+    crawl the UI should present as "very slow" rather than a precise clock time.
+    """
+    if current_temp is None or target_temp is None or not rate or rate <= 0:
+        return None
+    gap = target_temp - current_temp
+    if gap <= 0:
+        return None  # already there — the heater is holding, not climbing
+    hours = gap / rate
+    minutes = int(round(hours * 60))
+    eta_dt = now + timedelta(hours=hours)
+    # prefix the weekday when it lands on another day, so HH:MM isn't ambiguous
+    at = eta_dt.strftime("%H:%M" if eta_dt.date() == now.date() else "%a %H:%M")
+    return {
+        "at": at,
+        "label": _fmt_duration(minutes),
+        "minutes": minutes,
+        "hours": round(hours, 1),
+        "over_cap": hours > MAX_PREHEAT_HOURS,
+    }
+
+
 def next_preheat(cfg: dict, now: datetime, current_temp: int | None, rate: float):
     """For display: the soonest upcoming ready-by today and when pre-heat would start."""
     best = None

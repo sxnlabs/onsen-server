@@ -124,3 +124,22 @@ async def test_set_config_persists(tmp_path):
         assert on_disk["eco_temp"] == 31
     finally:
         await _teardown(spa, sup)
+
+
+async def test_disabled_tick_still_exposes_rate_and_eta(tmp_path):
+    # The scheduler is off, but the UI still wants an ETA toward the live setpoint.
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 30, "preset_temp": 35,
+                   "heater": True})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    sch = Scheduler(sup, config_path=str(tmp_path / "s.json"), tick_seconds=9999)
+    sch.set_config({"enabled": False, "heat_rate_c_per_h": 1.0})
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert sch.last_plan["enabled"] is False
+        assert sch.current_heat_rate() > 0
+        assert sch.last_plan["eta"]["minutes"] == 300   # 5 °C at 1 °C/h
+    finally:
+        await sup.client.close()
+        await spa.stop()

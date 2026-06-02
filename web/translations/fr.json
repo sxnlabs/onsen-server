@@ -13,6 +13,8 @@
   "panel.lower_setpoint": "Baisser la consigne",
   "panel.raise_setpoint": "Monter la consigne",
   "panel.updated": "Mis à jour {at}",
+  "panel.eta_ready": "Consigne atteinte vers {at} (~{dur})",
+  "panel.eta_slow": "Chauffe très lente (météo froide)",
 
   "toggle.power": "Power",
   "toggle.heater": "Chauffage",

@@ -35,6 +35,7 @@ from intex_spa import cover_detect, protocol
 from intex_spa.camera import CameraSnapshot, UsageStore
 from intex_spa.client import SpaUnreachable
 from intex_spa.history import TempHistory
+from intex_spa import schedule as sched_mod
 from intex_spa.protect_client import ProtectPoller
 from intex_spa.scheduler import Scheduler
 from intex_spa.supervisor import Supervisor
@@ -229,8 +230,23 @@ def create_app(
             **extra,
         }
 
+    def _panel_eta(state: dict | None):
+        """ETA to the live setpoint for the panel — only while actively heating."""
+        st = (state or {}).get("status") or {}
+        if not st.get("heater"):
+            return None  # not climbing → no estimate (avoid a misleading time)
+        return sched_mod.eta_to_setpoint(
+            _dt.datetime.now(),
+            st.get("current_temp"),
+            st.get("preset_temp"),
+            scheduler.current_heat_rate(),
+        )
+
     def render_panel(request: Request):
-        return templates.TemplateResponse(request, "_panel.html", _ctx(request, s=supervisor.state))
+        return templates.TemplateResponse(
+            request, "_panel.html",
+            _ctx(request, s=supervisor.state, eta=_panel_eta(supervisor.state)),
+        )
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request):
@@ -262,6 +278,7 @@ def create_app(
             _ctx(
                 request,
                 s=supervisor.state,
+                eta=_panel_eta(supervisor.state),
                 spa_host=host,
                 camera_enabled=camera is not None,
             ),
@@ -546,7 +563,7 @@ def create_app(
                     # Build the same closure-based context the regular routes
                     # use (env.globals don't carry `t`).
                     html = templates.env.get_template("_panel.html").render(
-                        **_ctx(request, s=state)
+                        **_ctx(request, s=state, eta=_panel_eta(state))
                     )
                     yield {"event": "update", "data": html}
             finally:
