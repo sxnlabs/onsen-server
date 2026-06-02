@@ -280,6 +280,7 @@ header h1 {
 }
 .cam-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 .cam-roi-actions { justify-content: flex-end; }
+.cam-roi-actions[hidden] { display: none; }  /* .cam-row sets display:flex, which would otherwise leak past [hidden] */
 .cam-badge {
   border-radius: 999px; padding: 5px 12px; font-size: 0.78rem; font-weight: 600;
   background: var(--card-hi); color: var(--fg);

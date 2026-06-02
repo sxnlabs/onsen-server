@@ -245,9 +245,16 @@
   });
   canvas.addEventListener('pointerup', function () { drag = null; });
 
+  // Settings panel visibility and the gear highlight are one state — keep them
+  // in sync so the gear never stays lit after the panel closes, and entering
+  // calibration always un-lights it.
+  function setSettingsOpen(open) {
+    if (settings) settings.hidden = !open;
+    if (btnSettings) btnSettings.classList.toggle('cam-btn-primary', open);
+  }
   function setCalibratingAndClose(v) {
     setCalibrating(v);
-    if (v && settings) settings.hidden = true;  // hide gear panel while dragging
+    if (v) setSettingsOpen(false);  // entering calibration closes the gear panel
   }
   btnRoi.addEventListener('click', function () { setCalibratingAndClose(true); });
   btnCancel.addEventListener('click', function () { setCalibratingAndClose(false); });
@@ -281,8 +288,9 @@
   // -- settings panel toggle (gear icon) --------------------------------
   if (btnSettings) {
     btnSettings.addEventListener('click', function () {
-      settings.hidden = !settings.hidden;
-      btnSettings.classList.toggle('cam-btn-primary', !settings.hidden);
+      var opening = settings.hidden;
+      if (opening && calibrating) setCalibrating(false);  // never show both panels at once
+      setSettingsOpen(opening);
     });
   }
 
