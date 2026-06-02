@@ -31,15 +31,16 @@ class Supervisor:
         air_provider: Callable[[], float | None] | None = None,
         command_log: CommandLog | None = None,
     ) -> None:
-        self.client = IntexSpaClient(host, port=port)
         self.poll_interval = poll_interval
         self.history = history if history is not None else TempHistory(path=None)
         self.command_log = command_log
+        self.client = IntexSpaClient(host, port=port, command_recorder=self._log_wire_command)
         # returns the current outside air temp (cached, non-blocking) or None
         self.air_provider = air_provider
-        # `paused` halts the poll loop and the scheduler's reconcile writes —
-        # in-memory only on purpose (a service kickstart implies "fresh start").
-        # User-initiated set_field/set_preset still go through (explicit intent).
+        # `paused` halts comfort automation writes, but polling continues: status
+        # reads are the safety feed and keepalive. In-memory only on purpose (a
+        # service kickstart implies "fresh start"). User-initiated set_field /
+        # set_preset still go through (explicit intent).
         self.paused: bool = False
         self.state: dict = {
             "status": None,      # last decoded status dict, or None until first read
@@ -122,9 +123,6 @@ class Supervisor:
 
     # -- operations -----------------------------------------------------------
     async def refresh(self) -> dict:
-        if self.paused:
-            # Skip the network round-trip; keep last known state.
-            return self.state
         try:
             st = await self.client.status()
             self._set_state(status=st, online=True, error=None)
@@ -174,6 +172,9 @@ class Supervisor:
             self.command_log.record(kind=kind, **entry)
         except Exception:  # noqa: BLE001 — logging is audit-only, never block spa control
             _LOG.exception("command audit log failed (non-fatal)")
+
+    def _log_wire_command(self, **entry) -> None:
+        self._log_command("wire", **entry)
 
     async def _poll_loop(self) -> None:
         while True:

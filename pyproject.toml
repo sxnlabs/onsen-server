@@ -2,7 +2,7 @@
 name = "intex-spa"
 version = "0.1.0"
 description = "Local web control for an Intex PureSpa (Baltik) over LAN"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",

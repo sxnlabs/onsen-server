@@ -94,7 +94,7 @@ def load_config(path: str | Path) -> dict:
         return dict(DEFAULT_CONFIG)
     try:
         return validate_config(json.loads(p.read_text()))
-    except (json.JSONDecodeError, ValueError, KeyError):
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         return dict(DEFAULT_CONFIG)
 
 
@@ -162,9 +162,6 @@ def evaluate(
     heat_rate: float | None = None,
 ) -> Desired:
     """Pure: compute the desired spa state for `now`."""
-    if not cfg.get("enabled"):
-        return Desired(reasons=[{"kind": "scheduler_disabled"}])
-
     reasons: list[dict] = []
     rate = heat_rate or float(cfg.get("heat_rate_c_per_h", 1.0))
 
@@ -173,6 +170,9 @@ def evaluate(
             heater=False,
             reasons=[{"kind": "sensor_error", "field": "current_temp"}],
         )
+
+    if not cfg.get("enabled"):
+        return Desired(reasons=[{"kind": "scheduler_disabled"}])
 
     setpoint, why = _active_setpoint(cfg["heat_rules"], now, int(cfg["eco_temp"]))
     reasons.append(why)

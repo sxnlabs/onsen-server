@@ -152,6 +152,12 @@ def test_load_missing_returns_default():
     assert S.load_config("/nonexistent/schedule.json") == S.DEFAULT_CONFIG
 
 
+def test_load_malformed_shape_returns_default(tmp_path):
+    f = tmp_path / "schedule.json"
+    f.write_text("[]")
+    assert S.load_config(f) == S.DEFAULT_CONFIG
+
+
 def test_estimate_heat_rate():
     pts = [
         {"t": 0, "cur": 30, "set": 38, "heat": True},

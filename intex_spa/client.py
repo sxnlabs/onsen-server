@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from . import protocol
 
@@ -29,11 +30,13 @@ class IntexSpaClient:
         port: int = protocol.PORT,
         timeout: float = 8.0,
         retries: int = 2,
+        command_recorder: Callable[..., None] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
         self.retries = retries
+        self.command_recorder = command_recorder
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
@@ -88,6 +91,16 @@ class IntexSpaClient:
                     await self._connect()
                 self._writer.write(req)
                 await asyncio.wait_for(self._writer.drain(), timeout=self.timeout)
+                if intent != "status" and self.command_recorder is not None:
+                    try:
+                        self.command_recorder(
+                            intent=intent,
+                            preset_temp=preset_temp,
+                            idempotent=idempotent,
+                            attempt=attempt + 1,
+                        )
+                    except Exception:  # noqa: BLE001 — audit only, never block control
+                        _LOG.exception("command recorder failed (non-fatal)")
                 line = await asyncio.wait_for(self._reader.readline(), timeout=self.timeout)
                 if not line:
                     raise ConnectionError("empty response (peer closed)")

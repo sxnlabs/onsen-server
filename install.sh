@@ -28,7 +28,7 @@ echo "→ provisioning venv (uv sync, incl. dev for the smoke test)"
 uv sync --extra dev
 
 echo "→ smoke test (offline)"
-uv run python -m pytest -q || echo "⚠  smoke tests failed — continuing install anyway"
+uv run python -m pytest -q
 
 mkdir -p state
 
@@ -38,10 +38,15 @@ if [ -n "${HERMES_PASSWORD:-}" ]; then
   chmod 600 state/.password
   echo "→ UI password set"
 elif [ "$BIND" = "0.0.0.0" ]; then
-  echo "⚠  Exposing the UI on the LAN (0.0.0.0) with NO password."
-  echo "   Add one:  HERMES_PASSWORD=… HERMES_HOST=0.0.0.0 INTEX_SPA_HOST=$SPA_HOST ./install.sh"
-  echo "   And — more importantly — lock the spa's own port at the UDM so only this"
-  echo "   Mac can reach $SPA_HOST:$SPA_PORT (the firmware itself has no auth)."
+  if [ "${HERMES_ALLOW_NO_PASSWORD_LAN:-}" != "1" ]; then
+    echo "Refusing to expose the UI on the LAN (0.0.0.0) with no password." >&2
+    echo "Add one: HERMES_PASSWORD=… HERMES_HOST=0.0.0.0 INTEX_SPA_HOST=$SPA_HOST ./install.sh" >&2
+    echo "Override only for a deliberately isolated network: HERMES_ALLOW_NO_PASSWORD_LAN=1" >&2
+    exit 1
+  fi
+  echo "⚠  Exposing the UI on the LAN (0.0.0.0) with NO password by explicit override."
+  echo "   Lock the spa's own port at the UDM so only this Mac can reach"
+  echo "   $SPA_HOST:$SPA_PORT (the firmware itself has no auth)."
 fi
 
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"

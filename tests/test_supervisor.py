@@ -70,8 +70,12 @@ async def test_command_writes_audit_log(tmp_path):
         await sup.refresh()
         await sup.set_field("filter", True)
         rows = [json.loads(line) for line in log_path.read_text().splitlines()]
-        assert len(rows) == 1
-        row = rows[0]
+        wire = [r for r in rows if r["kind"] == "wire"]
+        logical = [r for r in rows if r["kind"] == "toggle"]
+        assert len(wire) == 1
+        assert wire[0]["intent"] == "filter"
+        assert len(logical) == 1
+        row = logical[0]
         assert row["kind"] == "toggle"
         assert row["field"] == "filter"
         assert row["desired"] is True

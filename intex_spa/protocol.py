@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 PORT = 8990
 
@@ -75,6 +76,21 @@ def checksum_str(data_hex: str) -> str:
     return format(checksum_int(data_hex), "X")
 
 
+def _expect_status_hex(data_hex: Any) -> str:
+    """Validate the full status hex payload before bit-level decoding."""
+    if not isinstance(data_hex, str):
+        raise SpaProtocolError(f"data is not a string: {type(data_hex).__name__}")
+    if len(data_hex) != 38:
+        raise SpaProtocolError(f"unexpected status length {len(data_hex)}: {data_hex!r}")
+    if len(data_hex) % 2:
+        raise SpaProtocolError(f"odd-length hex data: {data_hex!r}")
+    try:
+        int(data_hex, 16)
+    except ValueError as e:
+        raise SpaProtocolError(f"non-hex status data: {data_hex!r}") from e
+    return data_hex
+
+
 def build_request(intent: str, preset_temp: int | None = None) -> tuple[bytes, str]:
     """Frame a request. Returns (raw line bytes, sid) -- sid echoes in the reply."""
     if intent not in COMMANDS:
@@ -91,6 +107,7 @@ def build_request(intent: str, preset_temp: int | None = None) -> tuple[bytes, s
 
 def decode_status(data_hex: str) -> dict:
     """Decode a full status `data` hex string (incl. trailing checksum byte)."""
+    data_hex = _expect_status_hex(data_hex)
     raw = int(data_hex, 16)
     preset = (raw >> 24) & 0xFF
     current_raw = (raw >> 88) & 0xFF
@@ -114,12 +131,12 @@ def parse_response(line: bytes, expected_sid: str | None = None) -> dict:
 
     if resp.get("result") != "ok":
         raise SpaProtocolError(f"result not ok: {resp.get('result')!r}")
+    if resp.get("type") != TYPE_STATUS:
+        raise SpaProtocolError(f"unexpected response type: {resp.get('type')!r}")
     if expected_sid is not None and resp.get("sid") != expected_sid:
         raise SpaProtocolError(f"sid mismatch: sent {expected_sid}, got {resp.get('sid')}")
 
-    data_hex = resp.get("data", "")
-    if len(data_hex) < 2:
-        raise SpaProtocolError(f"data too short: {data_hex!r}")
+    data_hex = _expect_status_hex(resp.get("data", ""))
     if checksum_int(data_hex[:-2]) != int(data_hex[-2:], 16):
         raise SpaProtocolError(f"checksum mismatch on {data_hex!r}")
 

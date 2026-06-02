@@ -90,3 +90,20 @@ def test_parse_response_not_ok():
     line = b'{"sid":"x","data":"FFFF110F010700220000000080808022000012","result":"error","type":2}\n'
     with pytest.raises(protocol.SpaProtocolError):
         protocol.parse_response(line)
+
+
+def test_decode_rejects_short_status_frame():
+    with pytest.raises(protocol.SpaProtocolError):
+        protocol.decode_status("FF")
+
+
+def test_parse_response_rejects_non_status_type():
+    line = b'{"sid":"x","data":"FFFF110F010700220000000080808022000012","result":"ok","type":1}\n'
+    with pytest.raises(protocol.SpaProtocolError):
+        protocol.parse_response(line)
+
+
+def test_parse_response_rejects_non_hex_data():
+    line = b'{"sid":"x","data":"FFFF110F0107002200000000808080220000ZZ","result":"ok","type":2}\n'
+    with pytest.raises(protocol.SpaProtocolError):
+        protocol.parse_response(line)

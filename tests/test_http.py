@@ -134,20 +134,19 @@ async def test_pause_toggle_round_trip():
         assert (await client.post("/api/pause?state=maybe")).status_code == 400
 
 
-async def test_pause_blocks_supervisor_refresh():
+async def test_pause_keeps_supervisor_refresh_active():
     spa = FakeSpa()
     async with app_for(spa) as client:
         sup = client.app.state.supervisor
-        original = sup.state["status"]["preset_temp"]
 
-        # Mutate the fake spa while the supervisor is paused — refresh()
-        # should NOT pick up the change because the network call is skipped.
+        # Mutate the fake spa while paused. Pause blocks comfort automation, not
+        # status polling: refresh remains the safety feed and keepalive.
         sup.set_paused(True)
         spa.state["preset_temp"] = 40
         await sup.refresh()
-        assert sup.state["status"]["preset_temp"] == original
+        assert sup.state["status"]["preset_temp"] == 40
 
-        # Resume: next refresh sees the new value.
+        # Resume keeps reading normally.
         sup.set_paused(False)
         await sup.refresh()
         assert sup.state["status"]["preset_temp"] == 40
