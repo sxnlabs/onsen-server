@@ -141,6 +141,23 @@ async def test_filter_off_leaves_heater_alone_when_already_off():
         await spa.stop()
 
 
+async def test_toggle_not_resent_when_ack_is_lost():
+    # The module applies the filter toggle but reports result:'timeout' (the ack
+    # is lost on a flaky link). The client must NOT blindly re-send the toggle —
+    # that would flip the relay straight back off. It must re-read and stop.
+    spa = FakeSpa()  # filter starts False
+    c = await _client_for(spa)
+    try:
+        spa.timeout_on = {"filter": 1}  # the filter toggle lands, ack comes back 'timeout'
+        st = await c.set("filter", True)
+        assert st["filter"] is True              # ended up where we asked
+        assert spa.intents.count("filter") == 1  # actuated exactly once, no cycle
+        assert spa.intents == ["status", "filter", "status"]  # send, then verify
+    finally:
+        await c.close()
+        await spa.stop()
+
+
 async def test_reconnects_after_broken_socket():
     spa = FakeSpa()
     c = await _client_for(spa)

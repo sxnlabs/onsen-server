@@ -68,10 +68,20 @@ class IntexSpaClient:
             await self._disconnect()
 
     # -- single round-trip (assumes lock held) --------------------------------
-    async def _roundtrip(self, intent: str, preset_temp: int | None = None) -> dict:
+    async def _roundtrip(
+        self, intent: str, preset_temp: int | None = None, *, idempotent: bool = True
+    ) -> dict:
+        """One request/response. Retries only when re-sending is safe.
+
+        `status` and `preset_temp` are idempotent on the wire, so a lost reply can
+        be retried by re-sending the same frame. Toggle commands are NOT — pass
+        `idempotent=False` to send exactly once and let the caller (`_toggle_to`)
+        decide what to do, by re-reading state, after a failure.
+        """
         req, sid = protocol.build_request(intent, preset_temp)
+        attempts = self.retries + 1 if idempotent else 1
         last_exc: Exception | None = None
-        for attempt in range(self.retries + 1):
+        for attempt in range(attempts):
             try:
                 if self._is_broken():
                     await self._disconnect()
@@ -86,13 +96,35 @@ class IntexSpaClient:
                 # malformed reply: retry without tearing the socket down
                 last_exc = e
                 _LOG.warning("protocol error (attempt %d): %s", attempt + 1, e)
-                await asyncio.sleep(0.5)
+                if idempotent:
+                    await asyncio.sleep(0.5)
             except (OSError, asyncio.TimeoutError) as e:
                 last_exc = e
                 _LOG.warning("network error (attempt %d): %s", attempt + 1, e)
                 await self._disconnect()
-                await asyncio.sleep(0.5)
-        raise SpaUnreachable(f"{intent} failed after {self.retries + 1} attempts: {last_exc}")
+                if idempotent:
+                    await asyncio.sleep(0.5)
+        raise SpaUnreachable(f"{intent} failed after {attempts} attempts: {last_exc}")
+
+    async def _toggle_to(self, field: str, desired: bool, st: dict) -> dict:
+        """Drive a toggle field to `desired`, safely over a flaky link.
+
+        A toggle inverts state on the wire, so re-sending one after a lost/failed
+        ack is dangerous: the command may have landed, and the resend flips it
+        straight back — that's how a marginal connection cycles the relay. So we
+        only ever fire a toggle when a *fresh* status read says it's still wrong,
+        send a single shot, then re-read to learn the real outcome.
+        """
+        for _ in range(self.retries + 1):
+            if bool(st.get(field)) == bool(desired):
+                return st  # already there — a toggle here would flip it the wrong way
+            try:
+                st = await self._roundtrip(field, idempotent=False)
+            except SpaUnreachable:
+                st = await self._roundtrip("status")  # ack lost? observe ground truth
+        if bool(st.get(field)) != bool(desired):
+            raise SpaUnreachable(f"could not drive {field} to {desired!r}")
+        return st
 
     # -- public API (each takes the lock) -------------------------------------
     async def status(self) -> dict:
@@ -106,15 +138,12 @@ class IntexSpaClient:
             st = await self._roundtrip("status")
             # Safety interlock: the heater must never run without circulation.
             # Enforce "heater on => filter on" on EVERY write path (manual UI
-            # included), not just the scheduler's decision engine. Toggles are
-            # guarded by the current state so they only fire when needed.
+            # included), not just the scheduler's decision engine.
             if field == "heater" and desired and not st.get("filter"):
-                st = await self._roundtrip("filter")  # circulation before heat
+                st = await self._toggle_to("filter", True, st)  # circulation first
             elif field == "filter" and not desired and st.get("heater"):
-                st = await self._roundtrip("heater")  # cut heat before circulation
-            if bool(st.get(field)) == bool(desired):
-                return st  # already there — toggling would flip it the wrong way
-            return await self._roundtrip(field)
+                st = await self._toggle_to("heater", False, st)  # cut heat first
+            return await self._toggle_to(field, desired, st)
 
     async def set_preset(self, temp: int) -> dict:
         if not (protocol.TEMP_MIN_C <= temp <= protocol.TEMP_MAX_C):

@@ -46,6 +46,10 @@ class FakeSpa:
         self.state = dict(state or self.DEFAULT_STATE)
         self.requests: list[dict] = []           # raw request dicts received
         self.intents: list[str | None] = []      # decoded intent per request
+        # fault injection: intent -> count of replies to return as result:'timeout'
+        # AFTER applying the state change -- models the real module's behaviour on
+        # a flaky link (the relay actuates but the ack is lost).
+        self.timeout_on: dict[str, int] = {}
         self.host = "127.0.0.1"
         self.port = 0
         self._server: asyncio.AbstractServer | None = None
@@ -86,10 +90,14 @@ class FakeSpa:
                 intent = self._match_intent(req["data"])
                 self.intents.append(intent)
                 self._apply(intent, req["data"])
+                result = "ok"
+                if self.timeout_on.get(intent, 0) > 0:
+                    self.timeout_on[intent] -= 1
+                    result = "timeout"  # state already applied; ack is "lost"
                 resp = {
                     "sid": req["sid"],
                     "data": encode_frame(self.state),
-                    "result": "ok",
+                    "result": result,
                     "type": protocol.TYPE_STATUS,
                 }
                 writer.write((json.dumps(resp) + "\n").encode())
