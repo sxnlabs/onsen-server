@@ -115,6 +115,20 @@ async def test_heater_on_skips_filter_when_already_circulating():
         await spa.stop()
 
 
+async def test_heater_on_rejected_without_valid_water_temperature():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181})
+    c = await _client_for(spa)
+    try:
+        with pytest.raises(ValueError):
+            await c.set("heater", True)
+        assert spa.intents == ["status"]
+        assert spa.state["heater"] is False
+        assert spa.state["filter"] is False
+    finally:
+        await c.close()
+        await spa.stop()
+
+
 async def test_filter_off_cuts_heater_first():
     spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "filter": True, "heater": True})
     c = await _client_for(spa)

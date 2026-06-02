@@ -1,9 +1,9 @@
 """FastAPI app: one process, one supervisor, one TCP connection to the spa.
 
-Run with uvicorn's factory mode (single worker — never more, or you'd get N
-supervisors fighting over the spa's single-client socket):
+Run with uvicorn's factory mode (default single in-process server; never pass
+--workers, or you'd get a process manager around the one spa socket):
 
-    INTEX_SPA_HOST=<spa-ip> uvicorn web.main:make_app --factory --workers 1
+    INTEX_SPA_HOST=<spa-ip> uvicorn web.main:make_app --factory
 
 The UI is HTMX + the SSE extension (assets vendored under static/vendor): the panel
 re-renders on every state push from the supervisor's poll loop; buttons POST commands
@@ -34,6 +34,7 @@ from intex_spa import camera as cam_mod
 from intex_spa import cover_detect, protocol
 from intex_spa.camera import CameraSnapshot, UsageStore
 from intex_spa.client import SpaUnreachable
+from intex_spa.command_log import CommandLog
 from intex_spa.history import TempHistory
 from intex_spa import schedule as sched_mod
 from intex_spa.protect_client import ProtectPoller
@@ -54,6 +55,7 @@ UI_TOGGLES = [
     ("filter", "toggle.filter", "🌀"),
     ("bubbles", "toggle.bubbles", "🫧"),
 ]
+UI_TOGGLE_FIELDS = {field for field, _label, _icon in UI_TOGGLES}
 
 
 def _fmt_ts(epoch: float | None) -> str:
@@ -81,6 +83,7 @@ def create_app(
     weather_lon: float = DEFAULT_LON,
     weather_cache_path: str | None = "state/weather.json",
     camera_config_path: str | None = "state/camera.json",
+    command_log_path: str | None = "state/commands.jsonl",
 ) -> FastAPI:
     weather = (
         WeatherClient(weather_lat, weather_lon, cache_path=weather_cache_path)
@@ -94,6 +97,7 @@ def create_app(
         poll_interval=poll_interval,
         history=history,
         air_provider=(weather.air_now if weather else None),
+        command_log=CommandLog(command_log_path),
     )
     scheduler = Scheduler(supervisor, config_path=schedule_path, weather=weather)
     secret = auth.load_or_create_secret(secret_path) if password else b""
@@ -290,11 +294,13 @@ def create_app(
 
     @app.post("/toggle/{field}", response_class=HTMLResponse)
     async def toggle(request: Request, field: str):
-        if field not in protocol.TOGGLE_FIELDS:
+        if field not in UI_TOGGLE_FIELDS:
             raise HTTPException(status_code=404, detail=f"unknown field {field!r}")
         current = bool((supervisor.state.get("status") or {}).get(field))
         try:
             await supervisor.set_field(field, not current)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         except SpaUnreachable as e:
             raise HTTPException(status_code=503, detail=str(e))
         scheduler.note_manual(field)  # don't let the scheduler immediately revert

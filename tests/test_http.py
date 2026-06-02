@@ -68,6 +68,14 @@ async def test_toggle_unknown_field_404():
         assert r.status_code == 404
 
 
+async def test_toggle_hidden_protocol_field_404():
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        r = await client.post("/toggle/sanitizer")
+        assert r.status_code == 404
+        assert spa.state["sanitizer"] is False
+
+
 async def test_preset_sets_temperature():
     spa = FakeSpa()
     async with app_for(spa) as client:
@@ -82,6 +90,15 @@ async def test_preset_out_of_range_400():
         assert (await client.post("/preset/50")).status_code == 400
         assert (await client.post("/preset/10")).status_code == 400
         assert spa.state["preset_temp"] == 37  # unchanged
+
+
+async def test_heater_toggle_rejected_without_valid_water_temperature():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181})
+    async with app_for(spa) as client:
+        r = await client.post("/toggle/heater")
+        assert r.status_code == 400
+        assert spa.state["heater"] is False
+        assert spa.state["filter"] is False
 
 
 async def test_healthz():

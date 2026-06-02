@@ -136,6 +136,8 @@ class IntexSpaClient:
             raise ValueError(f"not a toggle field: {field!r}")
         async with self._lock:
             st = await self._roundtrip("status")
+            if field == "heater" and desired and st.get("current_temp") is None:
+                raise ValueError("refusing to enable heater without a valid water temperature")
             # Safety interlock: the heater must never run without circulation.
             # Enforce "heater on => filter on" on EVERY write path (manual UI
             # included), not just the scheduler's decision engine.

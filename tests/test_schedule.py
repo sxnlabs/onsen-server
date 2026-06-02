@@ -41,6 +41,16 @@ def test_heater_off_when_at_or_above_setpoint():
     assert d.heater is False
 
 
+def test_sensor_error_cuts_heat_and_makes_no_other_demands():
+    cfg = mk(heat_rules=[{"days": [0, 1, 2, 3, 4, 5, 6], "time": "07:00", "temp": 38}])
+    d = S.evaluate(cfg, at(8), current_temp=None)
+    assert d.setpoint is None
+    assert d.heater is False
+    assert d.filter is None
+    assert d.power is None
+    assert d.reasons == [{"kind": "sensor_error", "field": "current_temp"}]
+
+
 def test_eco_fallback_when_no_rules():
     cfg = mk(eco_temp=29, heat_rules=[])
     d = S.evaluate(cfg, at(8), current_temp=25)

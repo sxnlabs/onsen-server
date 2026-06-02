@@ -168,6 +168,12 @@ def evaluate(
     reasons: list[dict] = []
     rate = heat_rate or float(cfg.get("heat_rate_c_per_h", 1.0))
 
+    if current_temp is None:
+        return Desired(
+            heater=False,
+            reasons=[{"kind": "sensor_error", "field": "current_temp"}],
+        )
+
     setpoint, why = _active_setpoint(cfg["heat_rules"], now, int(cfg["eco_temp"]))
     reasons.append(why)
 

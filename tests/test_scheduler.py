@@ -102,6 +102,61 @@ async def test_manual_override_blocks_field(tmp_path):
         await _teardown(spa, sup)
 
 
+async def test_sensor_error_cuts_heat_even_with_manual_override(tmp_path):
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181, "filter": True, "heater": True})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps({"enabled": True, "eco_temp": 38}))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999)
+    sch.note_manual("heater")
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert spa.state["heater"] is False
+        assert spa.intents == ["status", "status", "heater"]
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_automation_cooldown_prevents_filter_chatter(tmp_path):
+    cfg = {"enabled": True, "eco_temp": 25,
+           "filter_windows": [{"days": [0], "start": "08:00", "end": "09:00"}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 30, "preset_temp": 25})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999)
+    sch.min_automation_toggle_seconds = 600
+    try:
+        await sch.tick_once(now=MON.replace(hour=8, minute=30))
+        assert spa.state["filter"] is True
+        await sch.tick_once(now=MON.replace(hour=9, minute=1))
+        assert spa.state["filter"] is True
+        assert spa.intents.count("filter") == 1
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_safety_heater_off_bypasses_automation_cooldown(tmp_path):
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181, "filter": True, "heater": True})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps({"enabled": True, "eco_temp": 38}))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999,
+                    min_automation_toggle_seconds=600)
+    sch._auto_changed_at["heater"] = __import__("time").time()
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert spa.state["heater"] is False
+    finally:
+        await _teardown(spa, sup)
+
+
 async def test_ready_by_preheats(tmp_path):
     cfg = {"enabled": True, "eco_temp": 30,
            "ready_by": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "10:00", "temp": 38}]}

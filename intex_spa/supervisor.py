@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 
 from .client import IntexSpaClient, SpaUnreachable
+from .command_log import CommandLog
 from .history import TempHistory
 from .protocol import PORT
 
@@ -28,10 +29,12 @@ class Supervisor:
         poll_interval: float = 10.0,
         history: TempHistory | None = None,
         air_provider: Callable[[], float | None] | None = None,
+        command_log: CommandLog | None = None,
     ) -> None:
         self.client = IntexSpaClient(host, port=port)
         self.poll_interval = poll_interval
         self.history = history if history is not None else TempHistory(path=None)
+        self.command_log = command_log
         # returns the current outside air temp (cached, non-blocking) or None
         self.air_provider = air_provider
         # `paused` halts the poll loop and the scheduler's reconcile writes —
@@ -133,22 +136,44 @@ class Supervisor:
         return self.state
 
     async def set_field(self, field: str, desired: bool) -> dict:
+        before = self.state.get("status")
         try:
             st = await self.client.set(field, desired)
-        except SpaUnreachable as e:
-            self._set_state(online=False, error=str(e))
+        except (SpaUnreachable, ValueError) as e:
+            self._log_command("toggle", field=field, desired=desired, before=before, error=str(e))
+            if isinstance(e, SpaUnreachable):
+                self._set_state(online=False, error=str(e))
             raise
+        except Exception as e:
+            self._log_command("toggle", field=field, desired=desired, before=before, error=str(e))
+            raise
+        self._log_command("toggle", field=field, desired=desired, before=before, after=st)
         self._set_state(status=st, online=True, error=None)
         return self.state
 
     async def set_preset(self, temp: int) -> dict:
+        before = self.state.get("status")
         try:
             st = await self.client.set_preset(temp)
-        except SpaUnreachable as e:
-            self._set_state(online=False, error=str(e))
+        except (SpaUnreachable, ValueError) as e:
+            self._log_command("preset", temp=temp, before=before, error=str(e))
+            if isinstance(e, SpaUnreachable):
+                self._set_state(online=False, error=str(e))
             raise
+        except Exception as e:
+            self._log_command("preset", temp=temp, before=before, error=str(e))
+            raise
+        self._log_command("preset", temp=temp, before=before, after=st)
         self._set_state(status=st, online=True, error=None)
         return self.state
+
+    def _log_command(self, kind: str, **entry) -> None:
+        if self.command_log is None:
+            return
+        try:
+            self.command_log.record(kind=kind, **entry)
+        except Exception:  # noqa: BLE001 — logging is audit-only, never block spa control
+            _LOG.exception("command audit log failed (non-fatal)")
 
     async def _poll_loop(self) -> None:
         while True:

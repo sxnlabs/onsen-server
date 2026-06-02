@@ -33,6 +33,7 @@ class Scheduler:
         config_path: str = "state/schedule.json",
         tick_seconds: float = 60.0,
         override_minutes: float = 60.0,
+        min_automation_toggle_seconds: float = 10 * 60.0,
         weather=None,
     ) -> None:
         self.sup = supervisor
@@ -40,8 +41,10 @@ class Scheduler:
         self.cfg = S.load_config(config_path) if config_path else dict(S.DEFAULT_CONFIG)
         self.tick_seconds = tick_seconds
         self.override_minutes = override_minutes
+        self.min_automation_toggle_seconds = min_automation_toggle_seconds
         self.weather = weather
         self._overrides: dict[str, float] = {}
+        self._auto_changed_at: dict[str, float] = {}
         self._task: asyncio.Task | None = None
         self.last_plan: dict | None = None
         # latest effective °C/h, refreshed every tick (even when disabled) so the
@@ -159,9 +162,21 @@ class Scheduler:
         def st() -> dict:
             return (self.sup.state or {}).get("status") or {}
 
+        safety_heater_off = desired.heater is False and any(
+            isinstance(r, dict) and r.get("kind") == "sensor_error"
+            for r in desired.reasons
+        )
+
+        async def auto_set(field: str, desired_value: bool, *, safety: bool = False) -> None:
+            if not safety and self._automation_cooldown(field):
+                _LOG.info("skip automated %s=%s during relay cooldown", field, desired_value)
+                return
+            await self.sup.set_field(field, desired_value)
+            self._auto_changed_at[field] = _time.time()
+
         try:
             if desired.power and not self._overridden("power") and not st().get("power"):
-                await self.sup.set_field("power", True)
+                await auto_set("power", True)
             if (
                 desired.setpoint is not None
                 and not self._overridden("preset")
@@ -170,15 +185,21 @@ class Scheduler:
                 await self.sup.set_preset(desired.setpoint)
             if (
                 desired.heater is not None
-                and not self._overridden("heater")
+                and (safety_heater_off or not self._overridden("heater"))
                 and bool(st().get("heater")) != desired.heater
             ):
-                await self.sup.set_field("heater", desired.heater)
+                await auto_set("heater", desired.heater, safety=safety_heater_off)
             if (
                 desired.filter is not None
                 and not self._overridden("filter")
                 and bool(st().get("filter")) != desired.filter
             ):
-                await self.sup.set_field("filter", desired.filter)
+                await auto_set("filter", desired.filter)
         except SpaUnreachable:
             _LOG.info("spa unreachable during reconcile; will retry next tick")
+
+    def _automation_cooldown(self, field: str) -> bool:
+        last = self._auto_changed_at.get(field)
+        if last is None:
+            return False
+        return (_time.time() - last) < self.min_automation_toggle_seconds
