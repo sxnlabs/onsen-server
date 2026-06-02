@@ -203,6 +203,11 @@
         empty.style.display = 'none'; wrap.style.display = '';
 
         var unit = '°' + (j.unit || 'C');
+        // Pin the x-axis to the real data extent. Without this, Chart.js's linear
+        // scale rounds the epoch-ms bounds up to a "nice" number and overshoots
+        // the last sample by a day or two — drawing empty space in the future.
+        var xmin = pts[0].t * 1000;
+        var xmax = pts[pts.length - 1].t * 1000;
         var water_data = pts.map(function (p) { return { x: p.t * 1000, y: p.cur }; });
         var set_data = pts.map(function (p) { return { x: p.t * 1000, y: p.set }; });
         var air_data = pts.map(function (p) { return { x: p.t * 1000, y: (p.air == null ? null : p.air) }; });
@@ -224,7 +229,7 @@
           responsive: true, maintainAspectRatio: false, animation: false,
           interaction: { mode: 'index', intersect: false },
           scales: {
-            x: { type: 'linear', grid: { display: false },
+            x: { type: 'linear', min: xmin, max: xmax, grid: { display: false },
                  ticks: { maxTicksLimit: 7, autoSkip: true, color: muted,
                           callback: function (v) { return fmtTick(v); } } },
             y: { grace: '15%', grid: { color: muted + '22' },
