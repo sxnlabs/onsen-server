@@ -104,6 +104,14 @@ class IntexSpaClient:
             raise ValueError(f"not a toggle field: {field!r}")
         async with self._lock:
             st = await self._roundtrip("status")
+            # Safety interlock: the heater must never run without circulation.
+            # Enforce "heater on => filter on" on EVERY write path (manual UI
+            # included), not just the scheduler's decision engine. Toggles are
+            # guarded by the current state so they only fire when needed.
+            if field == "heater" and desired and not st.get("filter"):
+                st = await self._roundtrip("filter")  # circulation before heat
+            elif field == "filter" and not desired and st.get("heater"):
+                st = await self._roundtrip("heater")  # cut heat before circulation
             if bool(st.get(field)) == bool(desired):
                 return st  # already there — toggling would flip it the wrong way
             return await self._roundtrip(field)

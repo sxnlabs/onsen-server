@@ -89,6 +89,58 @@ async def test_set_rejects_non_toggle_field():
         await spa.stop()
 
 
+async def test_heater_on_forces_filter_on_first():
+    spa = FakeSpa()  # filter False, heater False
+    c = await _client_for(spa)
+    try:
+        st = await c.set("heater", True)
+        # circulation must come up BEFORE heat: read, toggle filter, toggle heater
+        assert spa.intents == ["status", "filter", "heater"]
+        assert st["filter"] is True
+        assert st["heater"] is True
+    finally:
+        await c.close()
+        await spa.stop()
+
+
+async def test_heater_on_skips_filter_when_already_circulating():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "filter": True})
+    c = await _client_for(spa)
+    try:
+        st = await c.set("heater", True)
+        assert spa.intents == ["status", "heater"]  # no spurious filter toggle
+        assert st["heater"] is True
+    finally:
+        await c.close()
+        await spa.stop()
+
+
+async def test_filter_off_cuts_heater_first():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "filter": True, "heater": True})
+    c = await _client_for(spa)
+    try:
+        st = await c.set("filter", False)
+        # never leave the heater running dry: cut heat, then stop circulation
+        assert spa.intents == ["status", "heater", "filter"]
+        assert st["heater"] is False
+        assert st["filter"] is False
+    finally:
+        await c.close()
+        await spa.stop()
+
+
+async def test_filter_off_leaves_heater_alone_when_already_off():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "filter": True})  # heater False
+    c = await _client_for(spa)
+    try:
+        st = await c.set("filter", False)
+        assert spa.intents == ["status", "filter"]
+        assert st["filter"] is False
+    finally:
+        await c.close()
+        await spa.stop()
+
+
 async def test_reconnects_after_broken_socket():
     spa = FakeSpa()
     c = await _client_for(spa)
