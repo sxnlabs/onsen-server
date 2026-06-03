@@ -172,6 +172,34 @@
         if (p) { for (var x in p) s = s.split('{' + x + '}').join(p[x]); }
         return s;
       };
+      function fallbackSkyByClock() {
+        var d = new Date();
+        var h = d.getHours() + d.getMinutes() / 60;
+        if (h < 6 || h >= 22) return 'night';
+        if ((h >= 6 && h < 8) || (h >= 19.5 && h < 22)) return 'golden';
+        return 'day-clear';
+      }
+      window.applySky = function (w) {
+        var sky = fallbackSkyByClock();
+        if (w && w.sunrise && w.sunset) {
+          var now = Date.now();
+          var sunrise = w.sunrise * 1000;
+          var sunset = w.sunset * 1000;
+          var goldenMs = 75 * 60 * 1000;
+          if (now < sunrise || now > sunset) sky = 'night';
+          else if ((now - sunrise) <= goldenMs || (sunset - now) <= goldenMs) sky = 'golden';
+          else sky = w.condition === 'cloudy' ? 'day-cloudy' : 'day-clear';
+        }
+        document.body.setAttribute('data-sky', sky);
+        var theme = document.querySelector('meta[name="theme-color"]:not([media])');
+        if (theme) {
+          theme.setAttribute('content', sky === 'night' ? '#061827'
+            : sky === 'golden' ? '#ffe0a8'
+            : sky === 'day-cloudy' ? '#d8e8ef'
+            : '#d9f4ff');
+        }
+      };
+      window.applySky(null);
       var chart = null;
       var rangeHours = 168; // default: last 7 days
       var css = getComputedStyle(document.documentElement);

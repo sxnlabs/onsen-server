@@ -84,6 +84,7 @@ web/auth.py              optional signed-cookie gate (HERMES_PASSWORD); UI-only,
 - `commands.jsonl` — append-only audit trail of app-initiated spa writes (toggle/preset, before/after/error).
 - `schedule.json` — user-edited schedule, served by `GET/POST /api/schedule`.
 - `manual_overrides.json` — active per-field manual scheduler holds, so UI/physical-panel overrides survive restarts.
+- `pause.json` — persisted automation pause flag; prevents restart from resuming comfort writes unexpectedly.
 - `weather.json` — last good Open-Meteo snapshot (kept across restarts so cold starts aren't blind).
 - `.secret` — HMAC key for login cookies (generated on first run when `HERMES_PASSWORD` is set).
 - `.password` — optional password file written by `install.sh` (alternative to the env var).

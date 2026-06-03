@@ -70,6 +70,7 @@ async def _client(spa, **kw):
     kw.setdefault("weather_enabled", False)
     kw.setdefault("camera_config_path", None)
     kw.setdefault("manual_override_path", None)
+    kw.setdefault("pause_path", None)
     app = create_app(host, port=port, poll_interval=9999,
                      history_path=None, schedule_path=None, **kw)
     await app.state.supervisor.refresh()

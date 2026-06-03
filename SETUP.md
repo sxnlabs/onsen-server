@@ -413,6 +413,7 @@ What's inside `state/`:
 | `.secret` | HMAC key for login cookies | Yes (auto-created), but all existing sessions on iPhone die. |
 | `schedule.json` | Heat / filter / ready-by rules | Yes via UI, but it's tedious. |
 | `manual_overrides.json` | Active manual scheduler holds | Yes — they expire naturally, but copy it to preserve an in-progress hold. |
+| `pause.json` | Automation pause flag | Yes — copy it if automation must remain paused after migration/restart. |
 | `history.jsonl` | 7-day temp history | No — irrecoverable, the only off-Mac copy is here. |
 | `weather.json` | Last Open-Meteo snapshot | Yes (auto-refetches in 30 min). |
 | `cam_history/` | Timelapse archives | No — burnt-in image data, not recreatable. |

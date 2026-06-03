@@ -16,6 +16,7 @@ async def app_for(spa: FakeSpa, **kw):
     host, port = await spa.start()
     # no background polling, no on-disk history/schedule, no auth, no network weather
     kw.setdefault("weather_enabled", False)
+    kw.setdefault("pause_path", None)
     app = create_app(
         host,
         port=port,
@@ -152,6 +153,18 @@ async def test_pause_toggle_round_trip():
         assert (await client.post("/api/pause?state=maybe")).status_code == 400
 
 
+async def test_pause_persists_across_app_instances(tmp_path):
+    pause_path = tmp_path / "pause.json"
+    spa = FakeSpa()
+    async with app_for(spa, pause_path=str(pause_path)) as client:
+        r = await client.post("/api/pause?state=on")
+        assert r.status_code == 200 and r.json()["paused"] is True
+
+    spa2 = FakeSpa()
+    async with app_for(spa2, pause_path=str(pause_path)) as client2:
+        assert (await client2.get("/healthz")).json()["paused"] is True
+
+
 async def test_pause_keeps_supervisor_refresh_active():
     spa = FakeSpa()
     async with app_for(spa) as client:
@@ -256,8 +269,10 @@ async def test_weather_endpoint_reports_snapshot():
         w = client.app.state.weather
         import time
         base = time.time()
-        w._hours = [{"t": base + i * 3600, "air": 8.0 + i, "feels": 7.0 + i, "wind": 10.0}
+        w._hours = [{"t": base + i * 3600, "air": 8.0 + i, "feels": 7.0 + i,
+                     "wind": 10.0, "code": 3}
                     for i in range(6)]
+        w._sun = [{"sunrise": base - 2 * 3600, "sunset": base + 6 * 3600}]
         w._fetched_at = base
         r = await client.get("/weather")
         assert r.status_code == 200
@@ -265,6 +280,8 @@ async def test_weather_endpoint_reports_snapshot():
         assert body["enabled"] is True
         assert body["source"] == "open-meteo"
         assert body["air"] == 8.0          # air_now at base = first hour
+        assert body["condition"] == "cloudy"
+        assert body["sunrise"] == w._sun[0]["sunrise"]
         assert body["hours"] == 6
 
 

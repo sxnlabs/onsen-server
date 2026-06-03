@@ -134,6 +134,7 @@
 
   function renderWeather(w) {
     var card = $("#weather-card");
+    if (window.applySky) window.applySky(w);
     if (!w || !w.enabled) { if (card) card.hidden = true; return; }
     card.hidden = false;
     var now = [];

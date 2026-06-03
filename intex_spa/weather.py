@@ -62,7 +62,8 @@ class WeatherClient:
         self.ttl = ttl
         self.timeout = timeout
         self.url_base = url_base
-        self._hours: list[dict] = []   # [{"t","air","feels","wind"}], sorted by t
+        self._hours: list[dict] = []   # [{"t","air","feels","wind","code"}], sorted by t
+        self._sun: list[dict] = []     # [{"sunrise","sunset"}], sorted by sunrise
         self._fetched_at: float = 0.0
         self._load()
 
@@ -77,6 +78,7 @@ class WeatherClient:
             hours = self._parse(payload)
             if hours:
                 self._hours = hours
+                self._sun = self._parse_sun(payload)
                 self._fetched_at = now
                 self._save()
                 return True
@@ -90,7 +92,8 @@ class WeatherClient:
             {
                 "latitude": self.lat,
                 "longitude": self.lon,
-                "hourly": "temperature_2m,apparent_temperature,wind_speed_10m",
+                "hourly": "temperature_2m,apparent_temperature,wind_speed_10m,weather_code",
+                "daily": "sunrise,sunset",
                 "forecast_days": 2,
                 "timeformat": "unixtime",
                 "timezone": "GMT",
@@ -107,6 +110,7 @@ class WeatherClient:
         air = h.get("temperature_2m") or []
         feels = h.get("apparent_temperature") or []
         wind = h.get("wind_speed_10m") or []
+        code = h.get("weather_code") or []
         out: list[dict] = []
         for i, t in enumerate(ts):
             if i >= len(air) or air[i] is None:
@@ -117,9 +121,23 @@ class WeatherClient:
                     "air": float(air[i]),
                     "feels": float(feels[i]) if i < len(feels) and feels[i] is not None else None,
                     "wind": float(wind[i]) if i < len(wind) and wind[i] is not None else None,
+                    "code": int(code[i]) if i < len(code) and code[i] is not None else None,
                 }
             )
         out.sort(key=lambda p: p["t"])
+        return out
+
+    @staticmethod
+    def _parse_sun(payload: dict) -> list[dict]:
+        d = (payload or {}).get("daily") or {}
+        sunrise = d.get("sunrise") or []
+        sunset = d.get("sunset") or []
+        out: list[dict] = []
+        for i, sr in enumerate(sunrise):
+            if i >= len(sunset) or sr is None or sunset[i] is None:
+                continue
+            out.append({"sunrise": float(sr), "sunset": float(sunset[i])})
+        out.sort(key=lambda p: p["sunrise"])
         return out
 
     def _load(self) -> None:
@@ -128,7 +146,13 @@ class WeatherClient:
         try:
             data = json.loads(self.cache_path.read_text())
             self._hours = data.get("hours") or []
+            self._sun = data.get("sun") or []
             self._fetched_at = float(data.get("fetched_at") or 0.0)
+            if self._hours and (
+                "code" not in self._hours[0] or not self._sun
+            ):
+                # Older caches predate UI sky state. Refresh immediately.
+                self._fetched_at = 0.0
         except (json.JSONDecodeError, ValueError, OSError):
             pass
 
@@ -138,7 +162,11 @@ class WeatherClient:
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
-            tmp.write_text(json.dumps({"fetched_at": self._fetched_at, "hours": self._hours}))
+            tmp.write_text(json.dumps({
+                "fetched_at": self._fetched_at,
+                "hours": self._hours,
+                "sun": self._sun,
+            }))
             tmp.replace(self.cache_path)
         except OSError:
             _LOG.warning("weather: could not persist cache", exc_info=True)
@@ -165,6 +193,19 @@ class WeatherClient:
     def air_now(self, now: float | None = None) -> float | None:
         return self.air_at(time.time() if now is None else now)
 
+    def code_at(self, when: float) -> int | None:
+        pts = [p for p in self._hours if p.get("code") is not None]
+        if not pts:
+            return None
+        closest = min(pts, key=lambda p: abs(p["t"] - when))
+        return int(closest["code"])
+
+    @staticmethod
+    def condition_for_code(code: int | None) -> str | None:
+        if code is None:
+            return None
+        return "clear" if code in {0, 1} else "cloudy"
+
     def air_window(self, start: float, end: float, key: str = "air") -> float | None:
         """Mean outside value over [start, end] (interpolates the endpoints)."""
         if end < start:
@@ -185,8 +226,19 @@ class WeatherClient:
             return v
         return round(min(vals), 2)
 
+    def sun_window(self, now: float | None = None) -> dict | None:
+        now = time.time() if now is None else now
+        if not self._sun:
+            return None
+        return min(
+            self._sun,
+            key=lambda p: abs(((p["sunrise"] + p["sunset"]) / 2.0) - now),
+        )
+
     def snapshot(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
+        code = self.code_at(now)
+        sun = self.sun_window(now) or {}
         return {
             "source": "open-meteo",
             "lat": self.lat,
@@ -194,6 +246,10 @@ class WeatherClient:
             "air": self.air_now(now),
             "feels": self.air_at(now, "feels"),
             "wind": self.air_at(now, "wind"),
+            "weather_code": code,
+            "condition": self.condition_for_code(code),
+            "sunrise": sun.get("sunrise"),
+            "sunset": sun.get("sunset"),
             "low_12h": self.low_ahead(12.0, now),
             "fetched_at": self._fetched_at or None,
             "age_s": round(now - self._fetched_at, 1) if self._fetched_at else None,

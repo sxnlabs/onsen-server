@@ -93,6 +93,7 @@ def create_app(
     camera_config_path: str | None = "state/camera.json",
     command_log_path: str | None = "state/commands.jsonl",
     manual_override_path: str | None = "state/manual_overrides.json",
+    pause_path: str | None = "state/pause.json",
 ) -> FastAPI:
     weather = (
         WeatherClient(weather_lat, weather_lon, cache_path=weather_cache_path)
@@ -107,6 +108,7 @@ def create_app(
         history=history,
         air_provider=(weather.air_now if weather else None),
         command_log=CommandLog(command_log_path),
+        pause_path=pause_path,
     )
     scheduler = Scheduler(
         supervisor,

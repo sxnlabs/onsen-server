@@ -194,6 +194,8 @@ water reading reaches setpoint + 1 °C; the spa's thermostat holds). Manual UI a
 (default 60 min) in `state/manual_overrides.json` so the scheduler won't immediately
 revert a manual change, even across a service restart. The card shows the live plan
 (setpoint, heat/rest, filter, learned rate).
+The automation pause flag is persisted in `state/pause.json`, so restarting the
+service never silently resumes scheduled comfort writes.
 
 ## Weather-aware pre-heat
 

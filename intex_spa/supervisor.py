@@ -9,9 +9,11 @@ known status on error, and pushes every state change to SSE subscribers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from .client import IntexSpaClient, SpaUnreachable
 from .command_log import CommandLog
@@ -30,18 +32,19 @@ class Supervisor:
         history: TempHistory | None = None,
         air_provider: Callable[[], float | None] | None = None,
         command_log: CommandLog | None = None,
+        pause_path: str | Path | None = None,
     ) -> None:
         self.poll_interval = poll_interval
         self.history = history if history is not None else TempHistory(path=None)
         self.command_log = command_log
+        self.pause_path = Path(pause_path) if pause_path else None
         self.client = IntexSpaClient(host, port=port, command_recorder=self._log_wire_command)
         # returns the current outside air temp (cached, non-blocking) or None
         self.air_provider = air_provider
         # `paused` halts comfort automation writes, but polling continues: status
-        # reads are the safety feed and keepalive. In-memory only on purpose (a
-        # service kickstart implies "fresh start"). User-initiated set_field /
+        # reads are the safety feed and keepalive. User-initiated set_field /
         # set_preset still go through (explicit intent).
-        self.paused: bool = False
+        self.paused: bool = self._load_paused()
         self.state: dict = {
             "status": None,      # last decoded status dict, or None until first read
             "online": False,
@@ -117,9 +120,31 @@ class Supervisor:
         keep working — pause only halts automated traffic to the controller."""
         was = self.paused
         self.paused = bool(on)
+        self._save_paused()
         if was and not self.paused:
             # On resume, push a fresh state event so SSE subscribers refresh.
             self._publish()
+
+    def _load_paused(self) -> bool:
+        if self.pause_path is None or not self.pause_path.exists():
+            return False
+        try:
+            raw = json.loads(self.pause_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            _LOG.warning("failed to read pause state", exc_info=True)
+            return False
+        return bool(raw.get("paused")) if isinstance(raw, dict) else False
+
+    def _save_paused(self) -> None:
+        if self.pause_path is None:
+            return
+        try:
+            self.pause_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.pause_path.with_suffix(self.pause_path.suffix + ".tmp")
+            tmp.write_text(json.dumps({"paused": self.paused}))
+            tmp.replace(self.pause_path)
+        except OSError:
+            _LOG.warning("failed to persist pause state", exc_info=True)
 
     # -- operations -----------------------------------------------------------
     async def refresh(self) -> dict:
