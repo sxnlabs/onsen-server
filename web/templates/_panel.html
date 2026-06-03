@@ -30,7 +30,13 @@
     {% if st.error_code %}
       <span class="errcode">⚠️ {{ st.error_code }}</span>
     {% elif st.current_temp is not none %}
-      <span class="mood">{% if st.current_temp < 24 %}🥶{% elif st.current_temp < 32 %}😎{% else %}♨️{% endif %}</span>
+      {% if st.preset_temp is not none and st.current_temp >= st.preset_temp %}
+        <span class="mood mood-ok">OK</span>
+      {% elif st.current_temp < 24 %}
+        <span class="mood">🥶</span>
+      {% elif st.current_temp < 32 %}
+        <span class="mood">😎</span>
+      {% endif %}
     {% endif %}
   </div>
 

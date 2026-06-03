@@ -70,6 +70,16 @@ async def test_panel_shows_manual_override_countdown():
         assert "60 min" in r.text
 
 
+async def test_panel_uses_text_badge_when_temperature_is_reached():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 35, "preset_temp": 35})
+    async with app_for(spa) as client:
+        r = await client.get("/panel")
+        assert r.status_code == 200
+        assert "mood-ok" in r.text
+        assert ">OK<" in r.text
+        assert "♨️" not in r.text
+
+
 async def test_toggle_flips_spa_state():
     spa = FakeSpa()  # bubbles starts False
     async with app_for(spa) as client:
