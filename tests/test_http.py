@@ -23,6 +23,7 @@ async def app_for(spa: FakeSpa, **kw):
         history_path=None,
         schedule_path=None,
         command_log_path=None,
+        manual_override_path=None,
         **kw,
     )
     await app.state.supervisor.refresh()  # deterministic initial snapshot

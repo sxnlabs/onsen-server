@@ -116,6 +116,45 @@ async def test_manual_override_remaining_prunes_expired(tmp_path):
         await _teardown(spa, sup)
 
 
+async def test_manual_override_survives_scheduler_restart(tmp_path):
+    spa, sup, sch = await _setup(tmp_path, cfg={"enabled": True})
+    override_path = tmp_path / "manual_overrides.json"
+    sch.override_path = override_path
+    try:
+        sch.note_manual("heater", "filter")
+
+        restarted = Scheduler(
+            sup,
+            config_path=str(tmp_path / "schedule.json"),
+            tick_seconds=9999,
+            override_path=override_path,
+        )
+
+        remaining = restarted.manual_overrides_remaining()
+        assert set(remaining) == {"heater", "filter"}
+        assert remaining["heater"] > 0
+        assert remaining["filter"] > 0
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_expired_manual_override_is_not_restored(tmp_path):
+    spa, sup, _sch = await _setup(tmp_path, cfg={"enabled": True})
+    override_path = tmp_path / "manual_overrides.json"
+    override_path.write_text(json.dumps({"heater": time.time() - 1, "filter": time.time() + 60}))
+    try:
+        restarted = Scheduler(
+            sup,
+            config_path=str(tmp_path / "schedule.json"),
+            tick_seconds=9999,
+            override_path=override_path,
+        )
+
+        assert restarted.manual_overrides_remaining().keys() == {"filter"}
+    finally:
+        await _teardown(spa, sup)
+
+
 async def test_sensor_error_cuts_heat_even_with_manual_override(tmp_path):
     spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181, "filter": True, "heater": True})
     host, port = await spa.start()

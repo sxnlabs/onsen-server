@@ -20,6 +20,7 @@ async def auth_client(spa: FakeSpa, tmp_path, password: str | None = PW):
         history_path=None,
         schedule_path=None,
         command_log_path=None,
+        manual_override_path=None,
         password=password,
         secret_path=str(tmp_path / ".secret"),
     )

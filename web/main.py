@@ -92,6 +92,7 @@ def create_app(
     weather_cache_path: str | None = "state/weather.json",
     camera_config_path: str | None = "state/camera.json",
     command_log_path: str | None = "state/commands.jsonl",
+    manual_override_path: str | None = "state/manual_overrides.json",
 ) -> FastAPI:
     weather = (
         WeatherClient(weather_lat, weather_lon, cache_path=weather_cache_path)
@@ -107,7 +108,12 @@ def create_app(
         air_provider=(weather.air_now if weather else None),
         command_log=CommandLog(command_log_path),
     )
-    scheduler = Scheduler(supervisor, config_path=schedule_path, weather=weather)
+    scheduler = Scheduler(
+        supervisor,
+        config_path=schedule_path,
+        weather=weather,
+        override_path=manual_override_path,
+    )
     secret = auth.load_or_create_secret(secret_path) if password else b""
 
     # -- camera subsystem (master switch via state/camera.json) ----------

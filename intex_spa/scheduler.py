@@ -10,9 +10,11 @@ doesn't immediately fight a manual change.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time as _time
 from datetime import datetime
+from pathlib import Path
 
 from . import schedule as S
 from .client import SpaUnreachable
@@ -39,6 +41,7 @@ class Scheduler:
         min_automation_toggle_seconds: float = 10 * 60.0,
         max_status_age_seconds: float = 30.0,
         weather=None,
+        override_path: str | Path | None = None,
     ) -> None:
         self.sup = supervisor
         self.config_path = config_path
@@ -48,6 +51,7 @@ class Scheduler:
         self.min_automation_toggle_seconds = min_automation_toggle_seconds
         self.max_status_age_seconds = max_status_age_seconds
         self.weather = weather
+        self.override_path = Path(override_path) if override_path else None
         self._overrides: dict[str, float] = {}
         self._auto_changed_at: dict[str, float] = {}
         self._last_seen_status: dict | None = None
@@ -56,6 +60,7 @@ class Scheduler:
         # latest effective °C/h, refreshed every tick (even when disabled) so the
         # UI can always show an ETA toward the setpoint. None until the first tick.
         self.heat_rate: float | None = None
+        self._load_overrides()
 
     # -- config ---------------------------------------------------------------
     def get_config(self) -> dict:
@@ -71,9 +76,13 @@ class Scheduler:
     # -- manual override ------------------------------------------------------
     def note_manual(self, *fields: str) -> None:
         until = _time.time() + self.override_minutes * 60
+        changed = False
         for f in fields:
             if f in _OVERRIDE_KEYS:
                 self._overrides[f] = until
+                changed = True
+        if changed:
+            self._save_overrides()
 
     def _overridden(self, field: str) -> bool:
         return self._overrides.get(field, 0.0) > _time.time()
@@ -82,6 +91,7 @@ class Scheduler:
         """Active manual scheduler holds, as field -> remaining whole seconds."""
         now = _time.time() if now is None else now
         active: dict[str, int] = {}
+        pruned = False
         for field in _OVERRIDE_ORDER:
             until = self._overrides.get(field)
             if until is None:
@@ -89,9 +99,45 @@ class Scheduler:
             remaining = int(max(0.0, until - now))
             if remaining <= 0:
                 self._overrides.pop(field, None)
+                pruned = True
                 continue
             active[field] = remaining
+        if pruned:
+            self._save_overrides()
         return active
+
+    def _load_overrides(self) -> None:
+        if self.override_path is None or not self.override_path.exists():
+            return
+        try:
+            raw = json.loads(self.override_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            _LOG.warning("failed to read manual override state", exc_info=True)
+            return
+        if not isinstance(raw, dict):
+            return
+
+        now = _time.time()
+        for field, until in raw.items():
+            if field not in _OVERRIDE_KEYS:
+                continue
+            try:
+                until_f = float(until)
+            except (TypeError, ValueError):
+                continue
+            if until_f > now:
+                self._overrides[field] = until_f
+
+    def _save_overrides(self) -> None:
+        if self.override_path is None:
+            return
+        try:
+            self.override_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.override_path.with_suffix(self.override_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(self._overrides, sort_keys=True))
+            tmp.replace(self.override_path)
+        except OSError:
+            _LOG.warning("failed to persist manual override state", exc_info=True)
 
     # -- heat rate ------------------------------------------------------------
     def current_heat_rate(self) -> float:
