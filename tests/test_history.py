@@ -91,3 +91,22 @@ def test_persists_across_instances(tmp_path):
     pts = h2.recent(hours=999, now=base)
     assert [p["cur"] for p in pts] == [19, 20]
     assert pts[-1]["set"] == 38 and pts[-1]["heat"] is True
+
+
+def test_startup_prune_rewrites_lazily(tmp_path):
+    import json
+    import time
+
+    f = tmp_path / "h.jsonl"
+    base = time.time()
+    old = {"t": base - 7200, "cur": 18, "set": 37, "heat": False}
+    keep = {"t": base, "cur": 19, "set": 37, "heat": False}
+    f.write_text(json.dumps(old) + "\n" + json.dumps(keep) + "\n")
+
+    h = TempHistory(path=f, retention_hours=1, min_interval=0)
+    assert h.recent(hours=999, now=base) == [keep]
+    assert f.read_text().count("\n") == 2
+
+    h.record(20, 37, False, ts=base + 1)
+    rows = [json.loads(line) for line in f.read_text().splitlines()]
+    assert [row["cur"] for row in rows] == [19, 20]

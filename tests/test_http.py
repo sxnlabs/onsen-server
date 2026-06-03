@@ -17,7 +17,13 @@ async def app_for(spa: FakeSpa, **kw):
     # no background polling, no on-disk history/schedule, no auth, no network weather
     kw.setdefault("weather_enabled", False)
     app = create_app(
-        host, port=port, poll_interval=9999, history_path=None, schedule_path=None, **kw
+        host,
+        port=port,
+        poll_interval=9999,
+        history_path=None,
+        schedule_path=None,
+        command_log_path=None,
+        **kw,
     )
     await app.state.supervisor.refresh()  # deterministic initial snapshot
     transport = httpx.ASGITransport(app=app)
@@ -200,6 +206,27 @@ async def test_history_endpoint():
         r2 = await client.get("/history?hours=168")
         assert r2.status_code == 200
         assert len(r2.json()["points"]) >= 1
+
+
+async def test_history_endpoint_can_decimate_for_chart():
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        hist = client.app.state.supervisor.history
+        hist._pts = [
+            {"t": float(i), "cur": i % 40, "set": 35, "heat": False}
+            for i in range(1000)
+        ]
+        full = await client.get("/history?hours=999999")
+        limited = await client.get("/history?hours=999999&max_points=100")
+        assert full.status_code == 200 and limited.status_code == 200
+        assert len(full.json()["points"]) == 1000
+        pts = limited.json()["points"]
+        assert len(pts) <= 100
+        assert pts[0]["t"] == 0.0
+        assert pts[-1]["t"] == 999.0
+
+        tiny = await client.get("/history?hours=999999&max_points=3")
+        assert [p["t"] for p in tiny.json()["points"]] == [0.0, 500.0, 999.0]
 
 
 async def test_weather_disabled_endpoint():

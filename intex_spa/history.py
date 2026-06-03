@@ -26,6 +26,7 @@ class TempHistory:
         self.retention = retention_hours * 3600
         self.min_interval = min_interval
         self._pts: list[dict] = []
+        self._needs_rewrite = False
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._load()
@@ -63,8 +64,9 @@ class TempHistory:
         self._pts.append(pt)
         pruned = self._prune(now=ts)
         if self.path:
-            if pruned:
+            if pruned or self._needs_rewrite:
                 self._rewrite()
+                self._needs_rewrite = False
             else:
                 self._append(pt)
         return pt
@@ -97,7 +99,7 @@ class TempHistory:
                 continue  # tolerate a torn final line
         self._pts = pts
         if self._prune(now=time.time()):
-            self._rewrite()
+            self._needs_rewrite = True
 
     def _append(self, pt: dict) -> None:
         # recreate the dir at write time too — it can be removed out from under a

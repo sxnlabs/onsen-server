@@ -193,7 +193,7 @@
 
       async function load() {
         var res;
-        try { res = await fetch('/history?hours=' + rangeHours); } catch (e) { return; }
+        try { res = await fetch('/history?hours=' + rangeHours + '&max_points=700'); } catch (e) { return; }
         if (!res.ok) return;
         var j = await res.json();
         var pts = j.points || [];

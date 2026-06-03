@@ -31,13 +31,11 @@ from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
 from intex_spa import camera as cam_mod
-from intex_spa import cover_detect, protocol
-from intex_spa.camera import CameraSnapshot, UsageStore
+from intex_spa import protocol
 from intex_spa.client import SpaUnreachable
 from intex_spa.command_log import CommandLog
 from intex_spa.history import TempHistory
 from intex_spa import schedule as sched_mod
-from intex_spa.protect_client import ProtectPoller
 from intex_spa.scheduler import Scheduler
 from intex_spa.supervisor import Supervisor
 from intex_spa.weather import DEFAULT_LAT, DEFAULT_LON, WeatherClient
@@ -67,6 +65,16 @@ def _fmt_ts(epoch: float | None) -> str:
 templates.env.filters["ts"] = _fmt_ts
 templates.env.globals["ui_toggles"] = UI_TOGGLES
 templates.env.globals["LANGS"] = i18n.LANGS
+
+
+def _load_cover_state(path: str | Path) -> dict | None:
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        return _json.loads(p.read_text())
+    except (_json.JSONDecodeError, OSError):
+        return None
 
 
 def create_app(
@@ -113,6 +121,8 @@ def create_app(
             roi = camera_config.get("roi")
             if not roi:
                 return
+            from intex_spa import cover_detect
+
             result = cover_detect.classify(
                 frame_path, roi,
                 baseline_on=camera_config.get("cover_baseline_on"),
@@ -121,7 +131,7 @@ def create_app(
             )
             cover_detect.save_state(camera_config["cover_state_path"], result)
 
-        camera = CameraSnapshot(
+        camera = cam_mod.CameraSnapshot(
             camera_config["rtsps_url"],
             frame_path=camera_config["frame_path"],
             history_dir=camera_config["history_dir"],
@@ -135,14 +145,19 @@ def create_app(
             ffmpeg_extra_args=camera_config["ffmpeg_extra_args"],
             post_grab=_classify_cover,
         )
-        usage = UsageStore(path=camera_config["usage_path"])
+        usage = cam_mod.UsageStore(path=camera_config["usage_path"])
         prot_cfg = camera_config.get("protect") or {}
-        protect = ProtectPoller(
-            prot_cfg.get("host", ""),
-            prot_cfg.get("user", ""),
-            prot_cfg.get("pass", ""),
-            usage,
-        )
+        if prot_cfg.get("host") and prot_cfg.get("user") and prot_cfg.get("pass"):
+            from intex_spa.protect_client import ProtectPoller
+
+            protect = ProtectPoller(
+                prot_cfg["host"],
+                prot_cfg["user"],
+                prot_cfg["pass"],
+                usage,
+            )
+        else:
+            protect = None
     else:
         camera = None
         usage = None
@@ -252,6 +267,40 @@ def create_app(
             _ctx(request, s=supervisor.state, eta=_panel_eta(supervisor.state)),
         )
 
+    def _decimate_points(points: list[dict], max_points: int | None) -> list[dict]:
+        """Reduce chart payload while preserving first/last and visible extrema."""
+        if not max_points or max_points <= 0 or len(points) <= max_points:
+            return points
+        if max_points == 1:
+            return [points[-1]]
+        if max_points == 2:
+            return [points[0], points[-1]]
+        if max_points == 3:
+            return [points[0], points[len(points) // 2], points[-1]]
+
+        buckets = max(1, (max_points - 2) // 2)
+        middle = points[1:-1]
+        if len(middle) <= buckets:
+            return points
+
+        out = [points[0]]
+        for i in range(buckets):
+            start = round(i * len(middle) / buckets)
+            end = round((i + 1) * len(middle) / buckets)
+            bucket = middle[start:end]
+            if not bucket:
+                continue
+            vals = [p for p in bucket if p.get("cur") is not None]
+            if not vals:
+                out.append(bucket[len(bucket) // 2])
+                continue
+            low = min(vals, key=lambda p: (p["cur"], p["t"]))
+            high = max(vals, key=lambda p: (p["cur"], -p["t"]))
+            pair = sorted({low["t"]: low, high["t"]: high}.values(), key=lambda p: p["t"])
+            out.extend(pair)
+        out.append(points[-1])
+        return out
+
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request):
         if not password:
@@ -318,9 +367,10 @@ def create_app(
         return render_panel(request)
 
     @app.get("/history")
-    async def history_json(hours: float = 24.0):
+    async def history_json(hours: float = 24.0, max_points: int | None = None):
         unit = (supervisor.state.get("status") or {}).get("unit") or "C"
-        return {"unit": unit, "points": supervisor.history.recent(hours=hours)}
+        points = supervisor.history.recent(hours=hours)
+        return {"unit": unit, "points": _decimate_points(points, max_points)}
 
     @app.get("/weather")
     async def weather_json():
@@ -399,7 +449,7 @@ def create_app(
         snap["roi"] = (camera_config or {}).get("roi")
         # last persisted cover state (None if never run / no pillow / no ROI)
         if camera_config:
-            snap["cover"] = cover_detect.load_state(camera_config["cover_state_path"])
+            snap["cover"] = _load_cover_state(camera_config["cover_state_path"])
             snap["baselines"] = {
                 "on": camera_config.get("cover_baseline_on"),
                 "off": camera_config.get("cover_baseline_off"),
@@ -455,6 +505,8 @@ def create_app(
         roi = camera_config.get("roi")
         if not roi:
             raise HTTPException(status_code=400, detail="calibrate the ROI first")
+        from intex_spa import cover_detect
+
         try:
             luma, std = await asyncio.to_thread(
                 cover_detect.sample, camera_config["frame_path"], roi,

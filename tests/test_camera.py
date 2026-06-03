@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -35,7 +36,7 @@ async def app_for(spa: FakeSpa, **kw):
     kw.setdefault("weather_enabled", False)
     kw.setdefault("camera_config_path", None)  # off by default
     app = create_app(host, port=port, poll_interval=9999,
-                     history_path=None, schedule_path=None, **kw)
+                     history_path=None, schedule_path=None, command_log_path=None, **kw)
     await app.state.supervisor.refresh()
     transport = httpx.ASGITransport(app=app)
     try:
@@ -339,6 +340,26 @@ async def test_camera_status_enabled_no_frame(tmp_path):
         assert body["frame_at"] is None
         assert body["protect_enabled"] is False
         assert body["roi"] is None
+
+
+async def test_camera_status_does_not_import_cover_detector(tmp_path):
+    sys.modules.pop("intex_spa.cover_detect", None)
+    spa = FakeSpa()
+    cfg_path = tmp_path / "camera.json"
+    cover_state = tmp_path / "cover_state.json"
+    _write_config(
+        cfg_path,
+        rtsps_url="rtsps://stub/x",
+        roi={"x": 1, "y": 2, "w": 3, "h": 4},
+        cover_state_path=str(cover_state),
+    )
+    cover_state.write_text(json.dumps({"state": "on", "confidence": 0.9}))
+
+    async with app_for(spa, camera_config_path=str(cfg_path)) as c:
+        r = await c.get("/api/camera/status")
+        assert r.json()["cover"]["state"] == "on"
+
+    assert "intex_spa.cover_detect" not in sys.modules
 
 
 async def test_camera_jpg_404_with_config_no_frame_yet(tmp_path):
