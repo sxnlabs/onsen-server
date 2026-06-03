@@ -189,8 +189,8 @@ main page (a form UI — day chips, time pickers, temp inputs; no JSON), persist
   estimated from the heat rate, which **starts at 1 °C/h and is learned from history**
   (`estimate_heat_rate`, falling back to `heat_rate_c_per_h`).
 
-The heater follows demand (on while below or exactly at setpoint, off above; the spa's
-thermostat holds). Manual UI actions and physical-panel changes register a per-field override
+The heater follows demand (on while below or exactly at setpoint, off once the rounded
+water reading reaches setpoint + 1 °C; the spa's thermostat holds). Manual UI actions and physical-panel changes register a per-field override
 (default 60 min) in `state/manual_overrides.json` so the scheduler won't immediately
 revert a manual change, even across a service restart. The card shows the live plan
 (setpoint, heat/rest, filter, learned rate).

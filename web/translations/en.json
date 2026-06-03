@@ -47,6 +47,7 @@
   "algo.preheat": "Pre-heating to {temp}° for {for_time}.",
   "algo.heating": "🔥 Calling for heat — {current}° → {target}°.",
   "algo.at_setpoint": "⏸ At setpoint ({target}°) — heater holds.",
+  "algo.above_setpoint": "Above setpoint by {margin}° ({current}° / {target}°) — heat cut.",
   "algo.filter_on": "🌀 Filter on.",
   "algo.filter_off": "Filter off.",
   "algo.no_circulation": "Safety — heat cut because filtration is not active.",

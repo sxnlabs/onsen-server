@@ -47,6 +47,7 @@
   "algo.preheat": "Pré-chauffe à {temp}° pour {for_time}.",
   "algo.heating": "🔥 Appelle de la chaleur — {current}° → {target}°.",
   "algo.at_setpoint": "⏸ À la consigne ({target}°) — le thermostat tient.",
+  "algo.above_setpoint": "Au-dessus de la consigne de {margin}° ({current}° / {target}°) — chauffage coupé.",
   "algo.filter_on": "🌀 Filtration en marche.",
   "algo.filter_off": "Filtration arrêtée.",
   "algo.no_circulation": "Sécurité — chauffage coupé car la filtration n'est pas active.",

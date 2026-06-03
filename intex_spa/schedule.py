@@ -36,6 +36,7 @@ DEFAULT_CONFIG: dict = {
 }
 
 MAX_PREHEAT_HOURS = 12.0  # cap pre-heat lead so a slow rate can't heat indefinitely
+HEATER_OFF_OVERSHOOT_C = 1  # keep heat authorized until water reaches setpoint + 1°C
 
 
 @dataclass
@@ -182,14 +183,21 @@ def evaluate(
         setpoint = rb_temp
         reasons.append(rb_why)
 
-    # Keep the heater function enabled at the exact setpoint and let the spa's
-    # own thermostat hold temperature. Only cut it once water is above target.
-    call_for_heat = current_temp is None or current_temp <= setpoint
-    heater = call_for_heat
+    # Keep the heater function enabled through the setpoint and let the spa's
+    # own thermostat hold temperature. Only cut it once water is 1°C above target.
+    heater_cutoff = setpoint + HEATER_OFF_OVERSHOOT_C
+    heater = current_temp is None or current_temp < heater_cutoff
     if current_temp < setpoint:
         reasons.append({"kind": "heating", "current": current_temp, "target": setpoint})
-    else:
+    elif heater:
         reasons.append({"kind": "at_setpoint", "target": setpoint})
+    else:
+        reasons.append({
+            "kind": "above_setpoint",
+            "current": current_temp,
+            "target": setpoint,
+            "margin": HEATER_OFF_OVERSHOOT_C,
+        })
 
     in_filter = any(
         now.weekday() in w["days"] and _in_window(now.time(), w["start"], w["end"])
