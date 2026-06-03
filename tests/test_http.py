@@ -76,7 +76,7 @@ async def test_panel_uses_text_badge_when_temperature_is_reached():
         r = await client.get("/panel")
         assert r.status_code == 200
         assert "mood-ok" in r.text
-        assert ">OK<" in r.text
+        assert ">Ready<" in r.text
         assert "♨️" not in r.text
 
 
