@@ -90,6 +90,29 @@ async def test_heat_rule_drives_setpoint_heater_filter(tmp_path):
         await _teardown(spa, sup)
 
 
+async def test_at_setpoint_keeps_heater_authorized_without_toggle(tmp_path):
+    cfg = {"enabled": True, "heat_rules": [
+        {"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 35}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 35, "preset_temp": 35,
+                   "filter": True, "heater": True})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999)
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert sch.last_plan["heater"] is True
+        assert sch.last_plan["filter"] is True
+        assert spa.state["heater"] is True
+        assert spa.state["filter"] is True
+        assert "heater" not in spa.intents[1:]
+        assert "filter" not in spa.intents[1:]
+    finally:
+        await _teardown(spa, sup)
+
+
 async def test_manual_override_blocks_field(tmp_path):
     cfg = {"enabled": True, "heat_rules": [
         {"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 39}]}

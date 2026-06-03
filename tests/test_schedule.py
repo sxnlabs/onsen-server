@@ -34,7 +34,16 @@ def test_heat_rule_active_sets_point_and_heater():
     assert d.power is True
 
 
-def test_heater_off_when_at_or_above_setpoint():
+def test_heater_stays_on_at_setpoint_to_let_spa_thermostat_hold():
+    cfg = mk(heat_rules=[{"days": [0, 1, 2, 3, 4, 5, 6], "time": "07:00", "temp": 30}])
+    d = S.evaluate(cfg, at(8), current_temp=30)
+    assert d.setpoint == 30
+    assert d.heater is True
+    assert d.filter is True
+    assert any(r["kind"] == "at_setpoint" for r in d.reasons)
+
+
+def test_heater_off_when_above_setpoint():
     cfg = mk(heat_rules=[{"days": [0, 1, 2, 3, 4, 5, 6], "time": "07:00", "temp": 30}])
     d = S.evaluate(cfg, at(8), current_temp=32)  # already warmer than target
     assert d.setpoint == 30

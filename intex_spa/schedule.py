@@ -182,10 +182,11 @@ def evaluate(
         setpoint = rb_temp
         reasons.append(rb_why)
 
-    # call for heat while below setpoint; let the spa's thermostat hold at setpoint
-    call_for_heat = current_temp is None or current_temp < setpoint
+    # Keep the heater function enabled at the exact setpoint and let the spa's
+    # own thermostat hold temperature. Only cut it once water is above target.
+    call_for_heat = current_temp is None or current_temp <= setpoint
     heater = call_for_heat
-    if call_for_heat:
+    if current_temp < setpoint:
         reasons.append({"kind": "heating", "current": current_temp, "target": setpoint})
     else:
         reasons.append({"kind": "at_setpoint", "target": setpoint})
