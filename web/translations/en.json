@@ -17,6 +17,10 @@
   "panel.eta_slow": "Heating very slowly (cold weather)",
   "panel.manual_hold_banner": "Manual action detected — automation leaves {fields} alone for another {remaining}.",
   "panel.manual_hold_minutes": "{minutes} min",
+  "panel.resume_blocked": "Cannot resume: the spa live status is not fresh enough.",
+  "panel.resume_confirm": "Resume automation and send these commands?\n\n{actions}",
+  "panel.resume_action_preset": "Setpoint → {temp}°",
+  "panel.resume_action_toggle": "{field} → {value}",
 
   "toggle.power": "Power",
   "toggle.heater": "Heat",

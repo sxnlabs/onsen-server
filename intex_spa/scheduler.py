@@ -42,6 +42,7 @@ class Scheduler:
         max_status_age_seconds: float = 30.0,
         weather=None,
         override_path: str | Path | None = None,
+        cooldown_path: str | Path | None = None,
     ) -> None:
         self.sup = supervisor
         self.config_path = config_path
@@ -52,6 +53,7 @@ class Scheduler:
         self.max_status_age_seconds = max_status_age_seconds
         self.weather = weather
         self.override_path = Path(override_path) if override_path else None
+        self.cooldown_path = Path(cooldown_path) if cooldown_path else None
         self._overrides: dict[str, float] = {}
         self._auto_changed_at: dict[str, float] = {}
         self._last_seen_status: dict | None = None
@@ -61,6 +63,7 @@ class Scheduler:
         # UI can always show an ETA toward the setpoint. None until the first tick.
         self.heat_rate: float | None = None
         self._load_overrides()
+        self._load_auto_cooldowns()
 
     # -- config ---------------------------------------------------------------
     def get_config(self) -> dict:
@@ -138,6 +141,61 @@ class Scheduler:
             tmp.replace(self.override_path)
         except OSError:
             _LOG.warning("failed to persist manual override state", exc_info=True)
+
+    # -- automation cooldown --------------------------------------------------
+    def automation_cooldowns_remaining(self, now: float | None = None) -> dict[str, int]:
+        now = _time.time() if now is None else now
+        active: dict[str, int] = {}
+        pruned = False
+        for field in ("power", "heater", "filter"):
+            last = self._auto_changed_at.get(field)
+            if last is None:
+                continue
+            remaining = int(self.min_automation_toggle_seconds - (now - last))
+            if remaining <= 0:
+                self._auto_changed_at.pop(field, None)
+                pruned = True
+                continue
+            active[field] = remaining
+        if pruned:
+            self._save_auto_cooldowns()
+        return active
+
+    def _note_auto_change(self, field: str) -> None:
+        self._auto_changed_at[field] = _time.time()
+        self._save_auto_cooldowns()
+
+    def _load_auto_cooldowns(self) -> None:
+        if self.cooldown_path is None or not self.cooldown_path.exists():
+            return
+        try:
+            raw = json.loads(self.cooldown_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            _LOG.warning("failed to read automation cooldown state", exc_info=True)
+            return
+        if not isinstance(raw, dict):
+            return
+        now = _time.time()
+        for field, last in raw.items():
+            if field not in {"power", "heater", "filter"}:
+                continue
+            try:
+                last_f = float(last)
+            except (TypeError, ValueError):
+                continue
+            if (now - last_f) < self.min_automation_toggle_seconds:
+                self._auto_changed_at[field] = last_f
+
+    def _save_auto_cooldowns(self) -> None:
+        if self.cooldown_path is None:
+            return
+        try:
+            self.cooldown_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.cooldown_path.with_suffix(self.cooldown_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(self._auto_changed_at, sort_keys=True))
+            tmp.replace(self.cooldown_path)
+        except OSError:
+            _LOG.warning("failed to persist automation cooldown state", exc_info=True)
 
     # -- heat rate ------------------------------------------------------------
     def current_heat_rate(self) -> float:
@@ -252,7 +310,7 @@ class Scheduler:
                 _LOG.info("skip automated filter=False while heater is in relay cooldown")
                 return
             await self.sup.set_field(field, desired_value)
-            self._auto_changed_at[field] = _time.time()
+            self._note_auto_change(field)
 
         try:
             if desired.power and not self._overridden("power") and not st().get("power"):
@@ -279,10 +337,114 @@ class Scheduler:
             _LOG.info("spa unreachable during reconcile; will retry next tick")
 
     def _automation_cooldown(self, field: str) -> bool:
-        last = self._auto_changed_at.get(field)
-        if last is None:
-            return False
-        return (_time.time() - last) < self.min_automation_toggle_seconds
+        return field in self.automation_cooldowns_remaining()
+
+    async def resume_preview(self, now: datetime | None = None) -> dict:
+        """Dry-run the commands automation would attempt if pause were lifted."""
+        now = now or datetime.now()
+        # Resuming automation is a control boundary. Require a live read even if
+        # the cached status is still within the normal scheduler freshness window.
+        live_read_ok = True
+        try:
+            await asyncio.wait_for(
+                self.sup.refresh(),
+                timeout=min(self.max_status_age_seconds, 8.0),
+            )
+        except asyncio.TimeoutError:
+            live_read_ok = False
+            _LOG.warning("resume preview live status read timed out")
+        state = self.sup.state or {}
+        updated_at = state.get("updated_at")
+        status = state.get("status") or {}
+        age = (_time.time() - float(updated_at)) if updated_at is not None else None
+        fresh = bool(
+            live_read_ok
+            and state.get("online")
+            and status
+            and age is not None
+            and age <= self.max_status_age_seconds
+        )
+        if not fresh:
+            return {
+                "can_resume": False,
+                "reason": "live_status_timeout" if not live_read_ok else "stale_status",
+                "online": bool(state.get("online")),
+                "status_age_s": round(age, 1) if age is not None else None,
+                "actions": [],
+                "blocked": [],
+            }
+
+        desired = S.evaluate(self.cfg, now, status.get("current_temp"), self.current_heat_rate())
+        self._apply_observed_safety(status, desired)
+        actions, blocked = self._planned_changes(status, desired)
+        return {
+            "can_resume": True,
+            "reason": None,
+            "online": True,
+            "status_age_s": round(age, 1),
+            "actions": actions,
+            "blocked": blocked,
+            "desired": {
+                "power": desired.power,
+                "setpoint": desired.setpoint,
+                "heater": desired.heater,
+                "filter": desired.filter,
+                "reasons": desired.reasons,
+            },
+        }
+
+    def _planned_changes(self, status: dict, desired: S.Desired) -> tuple[list[dict], list[dict]]:
+        actions: list[dict] = []
+        blocked: list[dict] = []
+        cooldowns = self.automation_cooldowns_remaining()
+        safety_heater_off = self._safety_heater_off(desired)
+
+        def add_toggle(field: str, value: bool, *, safety: bool = False) -> None:
+            if not safety and field in cooldowns:
+                blocked.append({
+                    "kind": "toggle",
+                    "field": field,
+                    "desired": value,
+                    "reason": "cooldown",
+                    "remaining": cooldowns[field],
+                })
+                return
+            actions.append({"kind": "toggle", "field": field, "desired": value})
+
+        if desired.power and not self._overridden("power") and not status.get("power"):
+            add_toggle("power", True)
+        if (
+            desired.setpoint is not None
+            and not self._overridden("preset")
+            and status.get("preset_temp") != desired.setpoint
+        ):
+            actions.append({"kind": "preset", "temp": desired.setpoint})
+        if (
+            desired.heater is not None
+            and (safety_heater_off or not self._overridden("heater"))
+            and bool(status.get("heater")) != desired.heater
+        ):
+            add_toggle("heater", desired.heater, safety=safety_heater_off)
+        if (
+            desired.filter is not None
+            and not self._overridden("filter")
+            and bool(status.get("filter")) != desired.filter
+        ):
+            if (
+                desired.filter is False
+                and status.get("heater")
+                and "heater" in cooldowns
+            ):
+                blocked.append({
+                    "kind": "toggle",
+                    "field": "filter",
+                    "desired": False,
+                    "reason": "heater_cooldown",
+                    "remaining": cooldowns["heater"],
+                })
+            else:
+                add_toggle("filter", desired.filter)
+        return actions, blocked
 
     async def _ensure_fresh_status(self) -> None:
         state = self.sup.state or {}

@@ -94,6 +94,7 @@ def create_app(
     command_log_path: str | None = "state/commands.jsonl",
     manual_override_path: str | None = "state/manual_overrides.json",
     pause_path: str | None = "state/pause.json",
+    automation_cooldown_path: str | None = "state/automation_cooldowns.json",
 ) -> FastAPI:
     weather = (
         WeatherClient(weather_lat, weather_lon, cache_path=weather_cache_path)
@@ -115,6 +116,7 @@ def create_app(
         config_path=schedule_path,
         weather=weather,
         override_path=manual_override_path,
+        cooldown_path=automation_cooldown_path,
     )
     secret = auth.load_or_create_secret(secret_path) if password else b""
 
@@ -429,8 +431,12 @@ def create_app(
             "paused": supervisor.paused,
         }
 
+    @app.get("/api/resume-preview")
+    async def api_resume_preview():
+        return await scheduler.resume_preview()
+
     @app.post("/api/pause")
-    async def api_pause(state: str | None = None):
+    async def api_pause(state: str | None = None, confirm: str | None = None):
         """Pause or resume the supervisor poll loop + scheduler reconciliation.
 
         Query string `state`: `on`/`true`/`1` → pause, `off`/`false`/`0` → resume,
@@ -446,6 +452,20 @@ def create_app(
             new = False
         else:
             raise HTTPException(status_code=400, detail="state must be on/off (or omit to toggle)")
+        if supervisor.paused and not new:
+            preview = await scheduler.resume_preview()
+            if not preview["can_resume"]:
+                raise HTTPException(status_code=409, detail={
+                    "message": "cannot resume automation without a fresh online spa status",
+                    "preview": preview,
+                })
+            confirmed = (confirm or "").lower() in {"1", "true", "yes", "confirm"}
+            if preview["actions"] and not confirmed:
+                raise HTTPException(status_code=409, detail={
+                    "message": "resuming automation would send spa commands",
+                    "requires_confirm": True,
+                    "preview": preview,
+                })
         supervisor.set_paused(new)
         return {"paused": supervisor.paused}
 

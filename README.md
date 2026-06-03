@@ -196,6 +196,9 @@ revert a manual change, even across a service restart. The card shows the live p
 (setpoint, heat/rest, filter, learned rate).
 The automation pause flag is persisted in `state/pause.json`, so restarting the
 service never silently resumes scheduled comfort writes.
+Resuming automation performs a dry-run first: `/api/resume-preview` lists pending
+commands, and `/api/pause?state=off` refuses to resume on stale/offline status or
+when commands would be sent unless `confirm=true` is supplied.
 
 ## Weather-aware pre-heat
 

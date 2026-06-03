@@ -17,6 +17,7 @@ async def app_for(spa: FakeSpa, **kw):
     # no background polling, no on-disk history/schedule, no auth, no network weather
     kw.setdefault("weather_enabled", False)
     kw.setdefault("pause_path", None)
+    kw.setdefault("automation_cooldown_path", None)
     app = create_app(
         host,
         port=port,
@@ -181,6 +182,100 @@ async def test_pause_keeps_supervisor_refresh_active():
         sup.set_paused(False)
         await sup.refresh()
         assert sup.state["status"]["preset_temp"] == 40
+
+
+async def test_resume_preview_reports_pending_commands():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 35, "preset_temp": 35,
+                   "filter": True, "heater": True})
+    async with app_for(spa) as client:
+        await client.post("/api/pause?state=on")
+        cfg = {"enabled": True, "eco_temp": 25,
+               "heat_rules": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 25}]}
+        assert (await client.post("/api/schedule", json=cfg)).status_code == 200
+
+        r = await client.get("/api/resume-preview")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["can_resume"] is True
+        assert {"kind": "preset", "temp": 25} in body["actions"]
+        assert {"kind": "toggle", "field": "heater", "desired": False} in body["actions"]
+
+
+async def test_resume_blocks_unconfirmed_pending_commands():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 35, "preset_temp": 35,
+                   "filter": True, "heater": True})
+    async with app_for(spa) as client:
+        await client.post("/api/pause?state=on")
+        cfg = {"enabled": True, "eco_temp": 25,
+               "heat_rules": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 25}]}
+        await client.post("/api/schedule", json=cfg)
+
+        r = await client.post("/api/pause?state=off")
+        assert r.status_code == 409
+        assert r.json()["detail"]["requires_confirm"] is True
+        assert (await client.get("/healthz")).json()["paused"] is True
+        assert spa.state["preset_temp"] == 35
+        assert spa.state["heater"] is True
+
+
+async def test_resume_allows_confirmed_pending_commands_without_sending_them_immediately():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 35, "preset_temp": 35,
+                   "filter": True, "heater": True})
+    async with app_for(spa) as client:
+        await client.post("/api/pause?state=on")
+        cfg = {"enabled": True, "eco_temp": 25,
+               "heat_rules": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 25}]}
+        await client.post("/api/schedule", json=cfg)
+
+        r = await client.post("/api/pause?state=off&confirm=true")
+        assert r.status_code == 200
+        assert r.json()["paused"] is False
+        assert spa.state["preset_temp"] == 35
+        assert spa.state["heater"] is True
+
+
+async def test_resume_allows_noop_plan_without_confirmation():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 35, "preset_temp": 35,
+                   "filter": True, "heater": True})
+    async with app_for(spa) as client:
+        await client.post("/api/pause?state=on")
+        cfg = {"enabled": True,
+               "heat_rules": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 35}]}
+        await client.post("/api/schedule", json=cfg)
+
+        r = await client.post("/api/pause?state=off")
+        assert r.status_code == 200
+        assert r.json()["paused"] is False
+
+
+async def test_resume_blocks_when_spa_status_is_not_fresh():
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        await client.post("/api/pause?state=on")
+        await spa.stop()
+
+        r = await client.post("/api/pause?state=off")
+        assert r.status_code == 409
+        assert "fresh online spa status" in r.json()["detail"]["message"]
+        assert (await client.get("/healthz")).json()["paused"] is True
+
+
+async def test_resume_blocks_when_live_status_read_times_out():
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        await client.post("/api/pause?state=on")
+        scheduler = client.app.state.scheduler
+        scheduler.max_status_age_seconds = 0.01
+
+        async def slow_refresh():
+            await asyncio.sleep(0.1)
+
+        client.app.state.supervisor.refresh = slow_refresh
+
+        r = await client.post("/api/pause?state=off")
+        assert r.status_code == 409
+        assert r.json()["detail"]["preview"]["reason"] == "live_status_timeout"
+        assert (await client.get("/healthz")).json()["paused"] is True
 
 
 async def test_index_includes_scheduler_ui():

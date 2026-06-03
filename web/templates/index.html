@@ -299,6 +299,33 @@
         pauseBtn.classList.toggle('is-paused', paused);
         pauseBanner.hidden = !paused;
       }
+      function plannedActionLabel(action) {
+        if (action.kind === 'preset') return T('panel.resume_action_preset', {temp: action.temp});
+        if (action.kind === 'toggle') {
+          var name = T('toggle.' + action.field);
+          var value = action.desired ? T('toggle.on') : T('toggle.off');
+          return T('panel.resume_action_toggle', {field: name, value: value});
+        }
+        return action.kind || '?';
+      }
+      async function resumeWithPreview() {
+        var previewResp = await fetch('/api/resume-preview');
+        if (!previewResp.ok) return;
+        var preview = await previewResp.json();
+        if (!preview.can_resume) {
+          window.alert(T('panel.resume_blocked'));
+          return;
+        }
+        var needsConfirm = (preview.actions || []).length > 0;
+        if (needsConfirm) {
+          var lines = preview.actions.map(plannedActionLabel).join('\n');
+          if (!window.confirm(T('panel.resume_confirm', {actions: lines}))) return;
+        }
+        var url = needsConfirm ? '/api/pause?state=off&confirm=true' : '/api/pause?state=off';
+        var r = await fetch(url, {method: 'POST'});
+        if (!r.ok) return;
+        applyPaused((await r.json()).paused);
+      }
       async function syncPause() {
         try {
           var r = await fetch('/healthz'); if (!r.ok) return;
@@ -307,7 +334,11 @@
       }
       pauseBtn.addEventListener('click', async function () {
         try {
-          var r = await fetch('/api/pause', {method: 'POST'});
+          if (pauseBtn.classList.contains('is-paused')) {
+            await resumeWithPreview();
+            return;
+          }
+          var r = await fetch('/api/pause?state=on', {method: 'POST'});
           if (!r.ok) return;
           applyPaused((await r.json()).paused);
         } catch (e) {}

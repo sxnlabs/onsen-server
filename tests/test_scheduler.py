@@ -178,6 +178,28 @@ async def test_expired_manual_override_is_not_restored(tmp_path):
         await _teardown(spa, sup)
 
 
+async def test_automation_cooldown_survives_scheduler_restart(tmp_path):
+    spa, sup, sch = await _setup(tmp_path, cfg={"enabled": True})
+    cooldown_path = tmp_path / "automation_cooldowns.json"
+    sch.cooldown_path = cooldown_path
+    try:
+        sch._note_auto_change("heater")
+
+        restarted = Scheduler(
+            sup,
+            config_path=str(tmp_path / "schedule.json"),
+            tick_seconds=9999,
+            min_automation_toggle_seconds=600,
+            cooldown_path=cooldown_path,
+        )
+
+        remaining = restarted.automation_cooldowns_remaining()
+        assert "heater" in remaining
+        assert remaining["heater"] > 0
+    finally:
+        await _teardown(spa, sup)
+
+
 async def test_sensor_error_cuts_heat_even_with_manual_override(tmp_path):
     spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181, "filter": True, "heater": True})
     host, port = await spa.start()

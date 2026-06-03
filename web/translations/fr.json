@@ -17,6 +17,10 @@
   "panel.eta_slow": "Chauffe très lente (météo froide)",
   "panel.manual_hold_banner": "Action manuelle détectée — l'automatisation laisse {fields} tranquille encore {remaining}.",
   "panel.manual_hold_minutes": "{minutes} min",
+  "panel.resume_blocked": "Reprise impossible : le statut live du spa n'est pas assez frais.",
+  "panel.resume_confirm": "Reprendre l'automatisation en envoyant ces commandes ?\n\n{actions}",
+  "panel.resume_action_preset": "Consigne → {temp}°",
+  "panel.resume_action_toggle": "{field} → {value}",
 
   "toggle.power": "Power",
   "toggle.heater": "Chauffage",
