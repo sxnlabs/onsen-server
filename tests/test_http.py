@@ -56,6 +56,17 @@ async def test_panel_partial():
         assert "🫧" in r.text  # toggle emoji rendered from ui_toggles
 
 
+async def test_panel_shows_manual_override_countdown():
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        client.app.state.scheduler.note_manual("heater")
+        r = await client.get("/panel")
+        assert r.status_code == 200
+        assert "Manual action detected" in r.text
+        assert "Heat" in r.text
+        assert "60 min" in r.text
+
+
 async def test_toggle_flips_spa_state():
     spa = FakeSpa()  # bubbles starts False
     async with app_for(spa) as client:

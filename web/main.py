@@ -240,10 +240,35 @@ def create_app(
             scheduler.current_heat_rate(),
         )
 
+    def _manual_hold_context(t):
+        remaining = scheduler.manual_overrides_remaining()
+        if not remaining:
+            return None
+        label_keys = {
+            "power": "toggle.power",
+            "preset": "panel.consigne",
+            "heater": "toggle.heater",
+            "filter": "toggle.filter",
+        }
+        fields = [t(label_keys.get(field, field)) for field in remaining]
+        longest = max(remaining.values())
+        minutes = max(1, (longest + 59) // 60)
+        return {
+            "fields": ", ".join(fields),
+            "remaining": t("panel.manual_hold_minutes", minutes=minutes),
+            "remaining_seconds": longest,
+        }
+
+    def _panel_context(request: Request, state: dict | None = None) -> dict:
+        state = supervisor.state if state is None else state
+        ctx = _ctx(request, s=state, eta=_panel_eta(state))
+        ctx["manual_hold"] = _manual_hold_context(ctx["t"])
+        return ctx
+
     def render_panel(request: Request):
         return templates.TemplateResponse(
             request, "_panel.html",
-            _ctx(request, s=supervisor.state, eta=_panel_eta(supervisor.state)),
+            _panel_context(request),
         )
 
     def _decimate_points(points: list[dict], max_points: int | None) -> list[dict]:
@@ -309,8 +334,7 @@ def create_app(
             "index.html",
             _ctx(
                 request,
-                s=supervisor.state,
-                eta=_panel_eta(supervisor.state),
+                **_panel_context(request),
                 spa_host=host,
                 camera_enabled=camera is not None,
             ),
@@ -585,7 +609,7 @@ def create_app(
                     # Build the same closure-based context the regular routes
                     # use (env.globals don't carry `t`).
                     html = templates.env.get_template("_panel.html").render(
-                        **_ctx(request, s=state, eta=_panel_eta(state))
+                        **_panel_context(request, state)
                     )
                     yield {"event": "update", "data": html}
             finally:

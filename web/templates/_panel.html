@@ -17,6 +17,12 @@
 </div>
 {% endif %}
 
+{% if manual_hold %}
+<div class="banner banner-manual-hold" role="status">
+  {{ t('panel.manual_hold_banner', fields=manual_hold.fields, remaining=manual_hold.remaining) }}
+</div>
+{% endif %}
+
 {% if st %}
 <section class="readout">
   <div class="temp">

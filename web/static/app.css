@@ -113,6 +113,12 @@ header h1 {
   color: var(--fg); padding: 10px 14px; border-radius: 12px;
   font-size: 0.78rem; line-height: 1.4;
 }
+.banner-manual-hold {
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
 .pause-btn {
   align-self: end; justify-self: end;
   border: 1px solid var(--card-hi); background: transparent; color: var(--muted);

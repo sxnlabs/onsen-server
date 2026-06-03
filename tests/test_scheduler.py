@@ -96,9 +96,22 @@ async def test_manual_override_blocks_field(tmp_path):
     spa, sup, sch = await _setup(tmp_path, cfg=cfg)
     try:
         sch.note_manual("heater")
+        assert "heater" in sch.manual_overrides_remaining()
         await sch.tick_once(now=MON.replace(hour=8))
         assert spa.state["heater"] is False    # override respected
         assert spa.state["preset_temp"] == 39  # other fields still managed
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_manual_override_remaining_prunes_expired(tmp_path):
+    spa, sup, sch = await _setup(tmp_path, cfg={"enabled": True})
+    try:
+        now = time.time()
+        sch._overrides["heater"] = now + 90
+        sch._overrides["filter"] = now - 1
+        assert sch.manual_overrides_remaining(now=now) == {"heater": 90}
+        assert "filter" not in sch._overrides
     finally:
         await _teardown(spa, sup)
 

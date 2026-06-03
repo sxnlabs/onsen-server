@@ -15,6 +15,8 @@
   "panel.updated": "Updated {at}",
   "panel.eta_ready": "Setpoint reached around {at} (~{dur})",
   "panel.eta_slow": "Heating very slowly (cold weather)",
+  "panel.manual_hold_banner": "Manual action detected — automation leaves {fields} alone for another {remaining}.",
+  "panel.manual_hold_minutes": "{minutes} min",
 
   "toggle.power": "Power",
   "toggle.heater": "Heat",

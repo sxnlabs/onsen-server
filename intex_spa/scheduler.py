@@ -21,6 +21,7 @@ _LOG = logging.getLogger("intex_spa.scheduler")
 
 # desired-field -> the spa field / override key it maps to
 _OVERRIDE_KEYS = {"power", "preset", "heater", "filter"}
+_OVERRIDE_ORDER = ("power", "preset", "heater", "filter")
 _OBSERVED_FIELDS = ("power", "heater", "filter", "preset_temp")
 _OVERRIDE_FOR_STATUS_FIELD = {"preset_temp": "preset"}
 
@@ -76,6 +77,21 @@ class Scheduler:
 
     def _overridden(self, field: str) -> bool:
         return self._overrides.get(field, 0.0) > _time.time()
+
+    def manual_overrides_remaining(self, now: float | None = None) -> dict[str, int]:
+        """Active manual scheduler holds, as field -> remaining whole seconds."""
+        now = _time.time() if now is None else now
+        active: dict[str, int] = {}
+        for field in _OVERRIDE_ORDER:
+            until = self._overrides.get(field)
+            if until is None:
+                continue
+            remaining = int(max(0.0, until - now))
+            if remaining <= 0:
+                self._overrides.pop(field, None)
+                continue
+            active[field] = remaining
+        return active
 
     # -- heat rate ------------------------------------------------------------
     def current_heat_rate(self) -> float:

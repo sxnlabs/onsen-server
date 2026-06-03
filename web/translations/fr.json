@@ -15,6 +15,8 @@
   "panel.updated": "Mis à jour {at}",
   "panel.eta_ready": "Consigne atteinte vers {at} (~{dur})",
   "panel.eta_slow": "Chauffe très lente (météo froide)",
+  "panel.manual_hold_banner": "Action manuelle détectée — l'automatisation laisse {fields} tranquille encore {remaining}.",
+  "panel.manual_hold_minutes": "{minutes} min",
 
   "toggle.power": "Power",
   "toggle.heater": "Chauffage",
