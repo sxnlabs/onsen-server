@@ -1,9 +1,7 @@
-/* Camera card: live snapshot refresh, cover-state badge, ROI calibration,
-   and a Chart.js plugin that draws "in use" bands on the temperature chart.
+/* Camera card: live snapshot refresh, cover-state badge, and ROI calibration.
 
-   The plugin is registered on the existing tempChart (exposed by index.html
-   inline script). We poll /api/camera/status and /usage independently from
-   the chart's own /history poll — fewer races, simpler retry logic. */
+   We poll /api/camera/status independently from the chart's own /history poll:
+   fewer races, simpler retry logic. */
 
 (function () {
   'use strict';
@@ -75,7 +73,6 @@
     var bits = [];
     if (snap.age_s != null) bits.push('🕒 ' + fmtAge(snap.age_s));
     if (snap.error) bits.push('⚠️ ' + snap.error.split('\n')[0].slice(0, 50));
-    if (snap.protect_enabled) bits.push('👤 motion');
     meta.textContent = bits.join(' · ');
   }
 
@@ -132,53 +129,6 @@
       updateMeta(snap);
       updateCover(snap);
     } catch (e) { /* network blip; try next tick */ }
-  }
-
-  // -- usage-overlay plugin on the temperature chart --
-  var usagePlugin = {
-    id: 'usageOverlay',
-    beforeDatasetsDraw: function (chart) {
-      var its = chart.$usage || [];
-      if (!its.length || !chart.scales || !chart.scales.x) return;
-      var ctx = chart.ctx;
-      var area = chart.chartArea;
-      var x = chart.scales.x;
-      ctx.save();
-      ctx.fillStyle = 'rgba(34,197,94,0.18)';   // soft green
-      for (var i = 0; i < its.length; i++) {
-        var it = its[i];
-        var x0 = x.getPixelForValue(it.start * 1000);
-        var x1 = x.getPixelForValue(it.end * 1000);
-        if (x1 < area.left || x0 > area.right) continue;
-        var L = Math.max(x0, area.left);
-        var R = Math.min(x1, area.right);
-        ctx.fillRect(L, area.top, R - L, area.bottom - area.top);
-      }
-      ctx.restore();
-    },
-  };
-
-  var pluginRegistered = false;
-  function registerWhenReady() {
-    if (window.tempChart && window.Chart && !pluginRegistered) {
-      window.Chart.register(usagePlugin);
-      pluginRegistered = true;
-    }
-  }
-  window.addEventListener('tempchart:ready', registerWhenReady);
-  registerWhenReady();   // in case chart was built before this script loaded
-
-  async function pollUsage() {
-    try {
-      var r = await fetch('/usage?hours=168');     // match the chart's default 7 d
-      if (!r.ok) return;
-      var j = await r.json();
-      if (!j.enabled) return;
-      if (window.tempChart) {
-        window.tempChart.$usage = j.intervals || [];
-        window.tempChart.update('none');
-      }
-    } catch (e) { /* try next tick */ }
   }
 
   // -- ROI calibration ---------------------------------------------------
@@ -332,6 +282,4 @@
   // -- start loops --
   pollStatus();
   setInterval(pollStatus, 5000);
-  pollUsage();
-  setInterval(pollUsage, 30000);
 })();

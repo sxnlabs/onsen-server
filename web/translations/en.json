@@ -122,13 +122,8 @@
   "recap.max": "max {value}°",
   "recap.samples": "{count} samples",
   "recap.no_data": "No measurements for this date.",
-  "recap.activity": "Activity near the spa",
-  "recap.total_minutes": "{minutes} min total",
-  "recap.no_activity": "No detection.",
-  "recap.partial_view": "Camera view is partial — \"activity near the spa\", not \"in the spa\".",
   "recap.timelapse": "Timelapse",
   "recap.tl_help": "Generated on demand from archived frames (≈ 1/min). Reload the page if the mp4 was just created.",
-  "recap.interval_minutes": "{minutes} min",
 
   "login.title": "Spa",
   "login.bad": "Wrong password",

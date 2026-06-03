@@ -8,8 +8,8 @@ validated byte-for-byte against a real PureSpa Baltik.
 
 **What you get on top of `aio-intex-spa`:** a mobile-first web UI, a weather-aware
 heat scheduler (pre-heats earlier when it's cold outside), a built-in camera
-subsystem (snapshot, daily timelapse, optional UniFi Protect activity overlay,
-experimental spa-cover ON/OFF detection), and a launchd service that's
+subsystem (snapshot, daily timelapse, experimental spa-cover ON/OFF detection),
+and a launchd service that's
 debugged for the silent failure modes you'll hit otherwise. Built for one
 specific Mac → spa setup; the code is licensed permissively so you can fork.
 
@@ -20,9 +20,7 @@ specific Mac → spa setup; the code is licensed permissively so you can fork.
 ![Desktop layout — temperature gauge, toggles, 7-day chart, camera, weather, scheduler](docs/screenshots/desktop-overview.png)
 
 *Two-column desktop layout: spa controls + temperature history on the left,
-weather + schedule on the right. The chart shades user-configured "in use"
-intervals (from UniFi Protect person-detection) over the water-temp line so a
-sudden dip lines up with a soak.*
+weather + schedule on the right, with a live camera card below the chart.*
 
 ![Camera card with the settings panel open — desktop](docs/screenshots/desktop-camera-settings.png)
 
@@ -48,9 +46,8 @@ spa/
 │   ├── history.py      # throttled temperature history (JSONL, self-healing)
 │   ├── schedule.py     # config + pure decision engine (heat / filter / ready-by)
 │   ├── scheduler.py    # async reconciler: applies the desired state, manual overrides
-│   ├── camera.py       # RTSP/RTSPS camera bridge: ffmpeg snapshot loop + usage store + timelapse
+│   ├── camera.py       # RTSP/RTSPS camera bridge: ffmpeg snapshot loop + timelapse
 │   ├── cover_detect.py # experimental ROI luma/std-dev cover ON/OFF heuristic (optional deps)
-│   └── protect_client.py # uiprotect person-event poller → UsageStore (optional dep)
 ├── web/
 │   ├── main.py         # FastAPI app (factory) + routes + SSE
 │   ├── templates/      # index.html + _panel.html (HTMX) + recap.html (timelapse + day stats)
@@ -64,7 +61,7 @@ spa/
 
 > **First time on this machine?** Read [`SETUP.md`](SETUP.md) — the end-to-end
 > bootstrap from a fresh Mac (brew + uv + ffmpeg, venv, `state/camera.json`,
-> LaunchAgent, ngrok tunnel, UniFi Protect creds, state restore from backup).
+> LaunchAgent, ngrok tunnel, state restore from backup).
 
 Dev:
 
@@ -233,12 +230,10 @@ single fail-soft module (`intex_spa/camera.py`) that mirrors `weather.py` —
 same lifecycle, same stale-but-useful pattern, same "no config ⇒ off" master
 switch.
 
-> **Vendor-agnostic for features 1, 3, 4** (snapshot, housse detection,
-> timelapse): any camera that speaks RTSP / RTSPS works — `ffmpeg` reads the
-> URL, it doesn't care who made the camera. Only **feature 2** (person-event
-> activity overlay on the chart) needs **UniFi Protect** specifically, via
-> the `uiprotect` Python lib. The examples below show UniFi paths because
-> that's the author's setup; substitute your camera's RTSP URL accordingly.
+> **Vendor-agnostic.** Any camera that speaks RTSP / RTSPS works — `ffmpeg`
+> reads the URL, it doesn't care who made the camera. The examples below use
+> a UniFi-style RTSPS URL because that's the author's setup; substitute your
+> camera's RTSP URL accordingly.
 
 **Master switch.** Everything is gated by `state/camera.json`. Missing file or empty
 `rtsps_url` ⇒ no background tasks, every endpoint returns `{"enabled": false}`, the
@@ -251,14 +246,13 @@ UI card is not rendered. The full shape (gitignored — never committed):
   "snapshot_max_width": 1280,
   "jpeg_quality": 7,
   "timelapse_retention_days": 7,
-  "protect": { "host": "<udm-ip>", "user": "", "pass": "" },
   "roi": null
 }
 ```
 
 System deps: `brew install ffmpeg` (system binary; verified with 8.x). Python deps
-for features 2 & 3 are optional — install with `uv sync --extra camera` (pulls
-`uiprotect`, `Pillow`, `numpy`). Core + offline test suite need none of them.
+for cover detection are optional — install with `uv sync --extra camera` (pulls
+`Pillow`, `numpy`). Core + offline test suite need none of them.
 
 ### Feature 1 — live snapshot
 
@@ -276,25 +270,7 @@ the spa supervisor.
 > "Unable to choose an output format" → silent timeout from the launchd process
 > (no Python traceback). Forcing the muxer fixes it. Test pinned.
 
-### Feature 2 — "in use" bands on the temperature chart
-
-`ProtectPoller` (lib `uiprotect`) hits the Protect controller every 30 s for the
-last 2 h of person-detection events, drops in-progress events, and feeds the closed
-ones into `UsageStore`. Close-in-time intervals merge (default gap ≤ 2 min) so a
-single visit reads as one band, not flicker. `GET /usage?hours=N` returns the
-intervals; a small Chart.js plugin (`web/static/camera.js`) overlays them as soft
-green shaded bands on the existing temperature chart — the water-temp dip lines up
-with use.
-
-Activate by filling `protect.user` / `protect.pass` in `state/camera.json` and
-`uv sync --extra camera`. Without creds (or without `uiprotect` installed) the
-poller never starts, `usage.jsonl` stays empty, the chart is unaffected.
-
-> **Honest labelling.** The camera only partially sees the spa, so we say
-> "activity near the spa", not "in the spa". The bands are useful as a heat-loss
-> correlate (open lid + people) — not a definitive occupancy count.
-
-### Feature 3 — cover ON / OFF (experimental)
+### Feature 2 — cover ON / OFF (experimental)
 
 `intex_spa/cover_detect.py` crops a user-calibrated ROI from the latest frame and
 classifies it with a simple luma + std-dev heuristic: a uniformly dark patch reads
@@ -313,7 +289,7 @@ partial view makes it unreliable. The plumbing is there (see `cover_detect.LUMA_
 thresholds) if a week of validated data later justifies feeding it into
 `effective_heat_rate` / `k_loss`.
 
-### Feature 4 — timelapse + daily recap
+### Feature 3 — timelapse + daily recap
 
 Each successful snapshot is hard-linked once per minute (`timelapse_every_seconds`)
 into `state/cam_history/YYYY-MM-DD/HH-MM-SS.jpg`. The dated directories are pruned
@@ -325,8 +301,8 @@ invalidates the cached mp4 (deleted on archive) so a re-request always picks up
 the fresh material.
 
 `GET /recap?date=…` renders a small page (`web/templates/recap.html`) combining
-the day's temp min/max + total minutes of activity + the timelapse video. Links
-on the camera tile point at today's `/recap` and `/timelapse`.
+the day's temp min/max + the timelapse video. Links on the camera tile point at
+today's `/recap` and `/timelapse`.
 
 ### Configuration & secrets
 
@@ -335,9 +311,6 @@ on the camera tile point at today's `/recap` and `/timelapse`.
   or commit messages.
 - **No env vars.** The whole subsystem is configured via `state/camera.json` —
   no `INTEX_CAMERA_*` env, matching the user's "single config source" preference.
-- **Setup notes for Protect creds.** See `state/PROTECT-CREDS-TODO.md` (also
-  gitignored) for the exact UniFi OS clicks (`Protect → Settings → Users` →
-  add a local Viewer user) and the post-install verification curl one-liner.
 
 ## Next steps (discussed, not built)
 

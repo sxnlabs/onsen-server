@@ -2,11 +2,10 @@
 
 Step-by-step to rebuild the spa controller from zero on a new MacBook. Order
 matters — later steps assume earlier ones succeeded. Expected total time: 15-30
-minutes if everything works first try, longer if Protect creds or ngrok need a
-detour.
+minutes if everything works first try, longer if ngrok needs a detour.
 
 If you're migrating *from* an existing Mac and want to keep history /
-calibration / passwords, jump to **§ 10 — Restore state from backup** first.
+calibration / passwords, jump to **§ 9 — Restore state from backup** first.
 
 ---
 
@@ -74,14 +73,12 @@ the firewall rule in 2.5 needs the Mac's IP to stay constant.
 
 ### 2.4 — Same treatment for the camera (if you'll use the camera features)
 
-If you plan to enable features 2-4 (snapshot, housse detection, timelapse —
-see **§ 9**), repeat **2.2 + 2.3** for the IP camera, plus for any controller
+If you plan to enable the camera (snapshot, housse detection, timelapse), repeat
+**2.2 + 2.3** for the IP camera, plus for any controller
 in front of it (e.g. an NVR or a router with a built-in camera dashboard).
 
 The camera doesn't have to be UniFi — any camera that speaks RTSP / RTSPS
-works (`ffmpeg` is what reads it). Only **feature 2** (person-event activity
-overlay) needs UniFi Protect specifically, because it uses the `uiprotect`
-Python lib — see § 9.
+works (`ffmpeg` is what reads it).
 
 ### 2.5 — (Optional but recommended) Firewall: Mac-only access to the spa
 
@@ -166,9 +163,8 @@ assumes you're in that directory.**
 uv sync --extra camera --extra dev
 ```
 
-The `--extra camera` pulls Pillow + numpy + uiprotect (needed for housse-state
-detection and person-event overlay). `--extra dev` pulls pytest + httpx so the
-offline test suite runs locally.
+The `--extra camera` pulls Pillow + numpy (needed for housse-state detection).
+`--extra dev` pulls pytest + httpx so the offline test suite runs locally.
 
 Smoke test that everything imports cleanly + tests pass:
 
@@ -200,18 +196,12 @@ open it (verified in the next step). Filled-out shape:
 {
   "rtsps_url": "rtsps://<camera-host>:7441/<TOKEN>?enableSrtp",
   "poll_seconds": 10,
-  "protect": {
-    "host": "<protect-host>",
-    "user": "",
-    "pass": ""
-  },
   "roi": null,
   "cover_baseline_on":  null,
   "cover_baseline_off": null,
   "cover_forced_state": null,
   "frame_path": "state/cam.jpg",
   "history_dir": "state/cam_history",
-  "usage_path": "state/usage.jsonl",
   "cover_state_path": "state/cover_state.json",
   "timelapse_every_seconds": 60.0,
   "timelapse_retention_days": 7,
@@ -404,24 +394,7 @@ curl -s https://<your-subdomain>.ngrok.io/healthz
 Then in iPhone Safari, open the public URL, type the password from
 `state/.password`, save to Keychain on first prompt.
 
-## 9. Optional: UniFi Protect creds (feature 2 — activity overlay)
-
-The "in use" green bands on the temperature chart come from UniFi Protect's
-person-detection events. Skip this unless you actually want them.
-
-1. UniFi OS → **Protect** → **Settings** → **Users** → create a local user
-   (NOT a Ubiquiti SSO account — `uiprotect` doesn't handle the OAuth
-   redirect). Role `Viewer` is enough.
-2. Fill `protect.host` / `protect.user` / `protect.pass` in `state/camera.json`.
-3. `launchctl kickstart -k gui/$(id -u)/com.sxnlabs.spa` to pick up the new
-   creds.
-4. Verify:
-   ```bash
-   curl -s http://127.0.0.1:8731/api/camera/status -b "<session-cookie>" | python3 -m json.tool | grep protect_enabled
-   # → "protect_enabled": true
-   ```
-
-## 10. Restore state from backup (migrating)
+## 9. Restore state from backup (migrating)
 
 If you have access to the old Mac, copy these files **before** doing § 6 — they
 contain irreplaceable runtime state and would otherwise have to be redone:
@@ -435,14 +408,13 @@ What's inside `state/`:
 
 | File | Why it matters | Regeneratable? |
 |---|---|---|
-| `camera.json` | RTSPS URL token + ROI + housse baselines | Token: re-grab in Protect. Baselines: re-do via UI. |
+| `camera.json` | RTSP/RTSPS URL token + ROI + housse baselines | Token: re-grab from camera/NVR. Baselines: re-do via UI. |
 | `.password` | UI password | Yes — generate a new one + re-save to Keychain. |
 | `.secret` | HMAC key for login cookies | Yes (auto-created), but all existing sessions on iPhone die. |
 | `schedule.json` | Heat / filter / ready-by rules | Yes via UI, but it's tedious. |
 | `history.jsonl` | 7-day temp history | No — irrecoverable, the only off-Mac copy is here. |
 | `weather.json` | Last Open-Meteo snapshot | Yes (auto-refetches in 30 min). |
 | `cam_history/` | Timelapse archives | No — burnt-in image data, not recreatable. |
-| `usage.jsonl` | Activity intervals from Protect | No — irrecoverable. |
 
 `chmod 600` `state/.password` again after the copy — `scp` may not preserve
 mode.

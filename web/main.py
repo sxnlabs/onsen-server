@@ -145,23 +145,8 @@ def create_app(
             ffmpeg_extra_args=camera_config["ffmpeg_extra_args"],
             post_grab=_classify_cover,
         )
-        usage = cam_mod.UsageStore(path=camera_config["usage_path"])
-        prot_cfg = camera_config.get("protect") or {}
-        if prot_cfg.get("host") and prot_cfg.get("user") and prot_cfg.get("pass"):
-            from intex_spa.protect_client import ProtectPoller
-
-            protect = ProtectPoller(
-                prot_cfg["host"],
-                prot_cfg["user"],
-                prot_cfg["pass"],
-                usage,
-            )
-        else:
-            protect = None
     else:
         camera = None
-        usage = None
-        protect = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -173,13 +158,9 @@ def create_app(
         await scheduler.start()
         if camera is not None:
             await camera.start()
-        if protect is not None:
-            await protect.start()  # no-op if creds missing / uiprotect not installed
         try:
             yield
         finally:
-            if protect is not None:
-                await protect.stop()
             if camera is not None:
                 await camera.stop()
             await scheduler.stop()
@@ -190,8 +171,6 @@ def create_app(
     app.state.scheduler = scheduler
     app.state.weather = weather
     app.state.camera = camera
-    app.state.usage = usage
-    app.state.protect = protect
     app.state.camera_config = camera_config
     app.state.camera_config_path = camera_config_path
     app.mount("/static", StaticFiles(directory=str(_BASE / "static")), name="static")
@@ -445,7 +424,6 @@ def create_app(
             return {"enabled": False}
         snap = camera.snapshot()
         snap["enabled"] = True
-        snap["protect_enabled"] = bool(protect and protect.enabled)
         snap["roi"] = (camera_config or {}).get("roi")
         # last persisted cover state (None if never run / no pillow / no ROI)
         if camera_config:
@@ -552,12 +530,6 @@ def create_app(
         await asyncio.to_thread(_classify_cover, camera_config["frame_path"])
         return {"ok": True, "forced_state": forced}
 
-    @app.get("/usage")
-    async def usage_json(hours: float = 24.0):
-        if usage is None:
-            return {"enabled": False, "intervals": []}
-        return {"enabled": True, "intervals": usage.recent(hours=hours)}
-
     @app.get("/timelapse")
     async def timelapse(date: str):
         if camera is None:
@@ -580,18 +552,12 @@ def create_app(
             day = _dt.datetime.strptime(d, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
-        # Day window in local epoch seconds (matches history.t and usage.{start,end})
+        # Day window in local epoch seconds (matches history.t)
         start = _dt.datetime.combine(day, _dt.time(0, 0)).timestamp()
         end = start + 86400
         pts = [p for p in supervisor.history.recent(hours=24 * 8)
                if start <= p["t"] < end and p.get("cur") is not None]
         temps = [p["cur"] for p in pts]
-        intervals = []
-        if usage is not None:
-            intervals = [it for it in usage.recent(hours=24 * 8)
-                         if it["end"] >= start and it["start"] < end]
-        total_use = sum(max(0.0, min(it["end"], end) - max(it["start"], start))
-                        for it in intervals)
         return templates.TemplateResponse(
             request, "recap.html",
             _ctx(
@@ -600,8 +566,6 @@ def create_app(
                 min_t=min(temps) if temps else None,
                 max_t=max(temps) if temps else None,
                 samples=len(pts),
-                intervals=intervals,
-                total_use_minutes=round(total_use / 60),
             ),
         )
 

@@ -244,7 +244,7 @@
         if (chart) { chart.data = data; chart.options = opts; chart.update('none'); }
         else {
           chart = new Chart(document.getElementById('tempChart'), { type: 'line', data: data, options: opts });
-          window.tempChart = chart;   // camera.js attaches its usage-overlay plugin to this
+          window.tempChart = chart;
           window.dispatchEvent(new CustomEvent('tempchart:ready'));
         }
       }

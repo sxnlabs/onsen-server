@@ -1,12 +1,12 @@
-"""UniFi Protect camera bridge — snapshot loop + usage events + timelapse.
+"""Camera bridge — snapshot loop + timelapse.
 
 Mirrors `weather.py`: a cached, fail-soft subsystem wired into `create_app` via
 lifespan tasks. The master switch is `load_config()` — when `state/camera.json`
 is missing or `rtsps_url` is empty, every consumer in this module sees `None`
 and degrades cleanly: no background tasks start, endpoints return
-`{"enabled": false}`, the UI hides the camera card. That's also why all the
-optional deps (`uiprotect`, `pillow`, `numpy`) live in companion modules with
-guarded imports — the core path here is stdlib + a system `ffmpeg`.
+`{"enabled": false}`, the UI hides the camera card. The core path here is stdlib
++ a system `ffmpeg`; optional image-analysis deps live in companion modules with
+guarded imports.
 
 ffmpeg runs as a subprocess from a worker thread (`asyncio.to_thread`) so the
 event loop is never blocked. Each grab writes `state/cam.jpg` atomically
@@ -34,14 +34,12 @@ _LOG = logging.getLogger("intex_spa.camera")
 DEFAULT_CONFIG = {
     "rtsps_url": "",
     "poll_seconds": 10.0,
-    "protect": {"host": "", "user": "", "pass": ""},
     "roi": None,                            # cover-detection ROI: {x,y,w,h} or None
     "cover_baseline_on": None,              # {luma, std} captured by the calibrate endpoint
     "cover_baseline_off": None,             # idem; both present ⇒ nearest-baseline classifier
     "cover_forced_state": None,             # "on"|"off" overrides the classifier; null = auto
     "frame_path": "state/cam.jpg",
     "history_dir": "state/cam_history",
-    "usage_path": "state/usage.jsonl",
     "cover_state_path": "state/cover_state.json",
     "timelapse_every_seconds": 60.0,        # archive ≈ 1 frame/min
     "timelapse_retention_days": 7,
@@ -71,8 +69,8 @@ def load_config(path: str | Path | None) -> dict | None:
         return None
     if not isinstance(data, dict) or not (data.get("rtsps_url") or "").strip():
         return None
+    data = {k: v for k, v in data.items() if k in DEFAULT_CONFIG}
     merged = {**DEFAULT_CONFIG, **data}
-    merged["protect"] = {**DEFAULT_CONFIG["protect"], **(data.get("protect") or {})}
     merged["_path"] = str(p)
     return merged
 
@@ -81,7 +79,7 @@ def save_config(path: str | Path, data: dict) -> None:
     """Persist `state/camera.json` atomically. Strips internal keys (leading _)."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    clean = {k: v for k, v in data.items() if not k.startswith("_")}
+    clean = {k: v for k, v in data.items() if k in DEFAULT_CONFIG and not k.startswith("_")}
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(clean, indent=2))
     tmp.replace(p)
@@ -183,8 +181,8 @@ class CameraSnapshot:
     def build_cmd(self, dest: Path) -> list[str]:
         """Default invocation: TCP transport, single frame, mid-quality JPEG.
 
-        Step 0 chose this form because UniFi Protect's rtsps endpoints reject
-        UDP and the default ffmpeg transport choice is unreliable over TLS.
+        The default ffmpeg transport choice is unreliable over TLS; TCP is
+        stable for RTSPS and regular RTSP cameras.
         """
         cmd = [
             self.ffmpeg_bin,
@@ -326,93 +324,3 @@ class CameraSnapshot:
             "poll_seconds": self.poll,
             "history_days": self.retention_days,
         }
-
-
-# -- usage events (Protect person-detection intervals) ------------------------
-class UsageStore:
-    """Append-only intervals {start, end, source} in JSONL, with merge + retention.
-
-    Each interval is "activity near the spa" (the camera only partially shows it).
-    Close-in-time intervals merge so a single session reads as one band on the
-    chart, not a flicker of micro-events.
-    """
-
-    def __init__(
-        self,
-        path: str | Path | None = "state/usage.jsonl",
-        retention_hours: float = 168.0,     # 7 days
-        merge_gap_seconds: float = 120.0,
-    ) -> None:
-        self.path = Path(path) if path else None
-        self.retention = retention_hours * 3600
-        self.merge_gap = merge_gap_seconds
-        self._items: list[dict] = []
-        if self.path:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._load()
-
-    def append(self, start: float, end: float, source: str = "protect-person") -> dict:
-        """Add (or extend) an interval. Returns the persisted/merged item."""
-        if end < start:
-            start, end = end, start
-        if self._items:
-            last = self._items[-1]
-            if start <= last["end"] + self.merge_gap:
-                last["end"] = max(last["end"], round(float(end), 1))
-                self._rewrite()
-                return last
-        item = {
-            "start": round(float(start), 1),
-            "end": round(float(end), 1),
-            "source": source,
-        }
-        self._items.append(item)
-        pruned = self._prune(now=end)
-        if pruned:
-            self._rewrite()
-        elif self.path:
-            self._append_line(item)
-        return item
-
-    def recent(self, hours: float = 24.0, now: float | None = None) -> list[dict]:
-        now = time.time() if now is None else now
-        cutoff = now - hours * 3600
-        return [it for it in self._items if it["end"] >= cutoff]
-
-    # -- internals --------------------------------------------------------
-    def _prune(self, now: float) -> bool:
-        cutoff = now - self.retention
-        keep = [it for it in self._items if it["end"] >= cutoff]
-        if len(keep) != len(self._items):
-            self._items = keep
-            return True
-        return False
-
-    def _load(self) -> None:
-        if not self.path or not self.path.exists():
-            return
-        items: list[dict] = []
-        for line in self.path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                items.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        self._items = items
-        if self._prune(now=time.time()):
-            self._rewrite()
-
-    def _append_line(self, item: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a") as f:
-            f.write(json.dumps(item) + "\n")
-
-    def _rewrite(self) -> None:
-        if not self.path:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text("".join(json.dumps(it) + "\n" for it in self._items))
-        tmp.replace(self.path)

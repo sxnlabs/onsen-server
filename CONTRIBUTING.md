@@ -16,7 +16,7 @@ issues are welcome but please match the existing constraints.
   touches the spa. This is what keeps the rule logic unit-testable without a
   clock or a spa.
 - **Fail-soft, stale-but-useful.** Every external dependency (spa, weather,
-  camera, Protect) is best-effort. Errors are logged, the last good state is
+  camera) is best-effort. Errors are logged, the last good state is
   kept, the UI shows it with an "offline" badge if relevant.
 - **No CDN imports.** All JS/CSS lives under `web/static/vendor/` so the app
   works offline on the LAN. Re-vendor by hand if you bump a version.
@@ -30,8 +30,8 @@ uv sync --extra dev --extra camera
 uv run pytest -q
 ```
 
-135 tests, all offline (fake spa + mocked subprocess + Pillow/uiprotect
-guarded). New code should come with new tests. The test suite must stay green
+The tests are all offline (fake spa + mocked subprocess + Pillow/numpy guarded).
+New code should come with new tests. The test suite must stay green
 on a fresh checkout with **no `state/camera.json`** — that's the contract for
 the master-switch design.
 

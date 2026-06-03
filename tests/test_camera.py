@@ -1,12 +1,10 @@
 """Offline tests for the camera subsystem.
 
-No camera, no Protect server, no ffmpeg on the wire — every external call is
-mocked. These tests pin:
+No camera, no ffmpeg on the wire — every external call is mocked. These tests pin:
   - the master-switch contract (no config ⇒ off, no surprises)
   - load_config / save_config round-trip and validation
   - CameraSnapshot._grab_once subprocess handling (success / non-zero / missing)
   - atomic frame write (the tmp + replace pattern)
-  - UsageStore merge + retention + persistence
   - HTTP endpoints in both modes (off vs on-but-no-frame)
 """
 
@@ -25,7 +23,7 @@ import pytest
 
 from fake_spa import FakeSpa
 from intex_spa import camera as cam_mod
-from intex_spa.camera import CameraSnapshot, UsageStore
+from intex_spa.camera import CameraSnapshot
 from web.main import create_app
 
 
@@ -52,7 +50,6 @@ def _write_config(path: Path, **overrides):
     base = {
         "rtsps_url": "rtsps://camera.local/test",
         "poll_seconds": 10,
-        "protect": {"host": "1.2.3.4", "user": "", "pass": ""},
         "roi": None,
     }
     base.update(overrides)
@@ -68,7 +65,7 @@ def test_load_config_missing_returns_none(tmp_path):
 
 def test_load_config_empty_url_returns_none(tmp_path):
     p = tmp_path / "camera.json"
-    p.write_text(json.dumps({"rtsps_url": "", "protect": {}}))
+    p.write_text(json.dumps({"rtsps_url": ""}))
     assert cam_mod.load_config(p) is None
 
 
@@ -89,16 +86,34 @@ def test_load_config_fills_defaults(tmp_path):
     assert cfg["jpeg_quality"] == 7
     assert cfg["timelapse_retention_days"] == 7
     assert cfg["frame_path"].endswith("cam.jpg")
-    # protect merges, not overwrites — host kept, user empty default kept
-    assert cfg["protect"]["host"] == "1.2.3.4"
-    assert cfg["protect"]["user"] == ""
+
+
+def test_load_config_drops_legacy_protect_keys(tmp_path):
+    p = tmp_path / "camera.json"
+    _write_config(
+        p,
+        protect={"host": "1.2.3.4", "user": "u", "pass": "p"},
+        usage_path="state/usage.jsonl",
+    )
+    cfg = cam_mod.load_config(p)
+    assert "protect" not in cfg
+    assert "usage_path" not in cfg
 
 
 def test_save_config_strips_internal_keys(tmp_path):
     p = tmp_path / "camera.json"
-    cam_mod.save_config(p, {"rtsps_url": "rtsps://x/y", "_path": "leak", "roi": {"x": 1, "y": 2, "w": 3, "h": 4}})
+    cam_mod.save_config(
+        p,
+        {
+            "rtsps_url": "rtsps://x/y",
+            "_path": "leak",
+            "protect": {"host": "legacy"},
+            "roi": {"x": 1, "y": 2, "w": 3, "h": 4},
+        },
+    )
     on_disk = json.loads(p.read_text())
     assert "_path" not in on_disk
+    assert "protect" not in on_disk
     assert on_disk["roi"] == {"x": 1, "y": 2, "w": 3, "h": 4}
 
 
@@ -210,50 +225,6 @@ def test_generate_timelapse_invokes_ffmpeg(tmp_path):
     assert again == mp4
 
 
-# -- UsageStore --------------------------------------------------------------
-def test_usage_append_basic(tmp_path):
-    us = UsageStore(path=tmp_path / "u.jsonl")
-    a = us.append(100, 110)
-    assert a["start"] == 100.0 and a["end"] == 110.0
-    assert us.recent(hours=24, now=200) == [a]
-
-
-def test_usage_append_merges_adjacent(tmp_path):
-    us = UsageStore(path=tmp_path / "u.jsonl", merge_gap_seconds=60)
-    us.append(100, 110)
-    # 130 is within merge_gap (60s) of 110 → merged
-    merged = us.append(130, 160)
-    assert merged["start"] == 100.0
-    assert merged["end"] == 160.0
-    # … but a far-away interval starts a new entry
-    new = us.append(500, 520)
-    assert new["start"] == 500.0
-    items = us.recent(hours=24, now=600)
-    assert len(items) == 2
-
-
-def test_usage_recent_filters_by_hours(tmp_path):
-    us = UsageStore(path=tmp_path / "u.jsonl", merge_gap_seconds=0)
-    us.append(100, 110)
-    us.append(10000, 10010)
-    # cutoff = now - 1h = 10000 - 3600 → both visible (within 3h) but only the
-    # second within 0.5h
-    assert len(us.recent(hours=0.5, now=10000)) == 1
-
-
-def test_usage_persists_to_disk(tmp_path):
-    import time
-    # Use a near-now timestamp so reload-time pruning doesn't drop the entry:
-    # `_load` calls _prune(now=time.time()) and the default retention is 7d.
-    now = time.time()
-    p = tmp_path / "u.jsonl"
-    us = UsageStore(path=p, merge_gap_seconds=0)
-    us.append(now - 100, now - 90)
-    us.append(now - 50, now - 40)
-    us2 = UsageStore(path=p, merge_gap_seconds=0)
-    assert len(us2.recent(hours=24, now=now)) == 2
-
-
 # -- cover_detect ------------------------------------------------------------
 def test_cover_detect_no_roi_returns_unknown(tmp_path):
     from intex_spa import cover_detect
@@ -299,13 +270,6 @@ async def test_camera_jpg_404_when_disabled():
         assert (await c.get("/camera.jpg")).status_code == 404
 
 
-async def test_usage_disabled_endpoint():
-    spa = FakeSpa()
-    async with app_for(spa) as c:
-        body = (await c.get("/usage")).json()
-        assert body == {"enabled": False, "intervals": []}
-
-
 async def test_timelapse_503_when_disabled():
     spa = FakeSpa()
     async with app_for(spa) as c:
@@ -338,7 +302,6 @@ async def test_camera_status_enabled_no_frame(tmp_path):
         body = r.json()
         assert body["enabled"] is True
         assert body["frame_at"] is None
-        assert body["protect_enabled"] is False
         assert body["roi"] is None
 
 

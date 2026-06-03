@@ -122,13 +122,8 @@
   "recap.max": "max {value}°",
   "recap.samples": "{count} échantillons",
   "recap.no_data": "Aucune mesure pour cette date.",
-  "recap.activity": "Activité près du spa",
-  "recap.total_minutes": "{minutes} min cumulées",
-  "recap.no_activity": "Aucune détection.",
-  "recap.partial_view": "Détection caméra partielle — « activité près du spa », pas « dans le spa ».",
   "recap.timelapse": "Timelapse",
   "recap.tl_help": "Généré à la volée à partir des frames archivées (≈ 1/min). Reposez la page si le mp4 vient d'être créé.",
-  "recap.interval_minutes": "{minutes} min",
 
   "login.title": "Spa",
   "login.bad": "Mot de passe incorrect",

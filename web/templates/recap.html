@@ -30,23 +30,6 @@
 
     <section class="cam-card">
       <div class="cam-top">
-        <span class="cam-title">👤 {{ t('recap.activity') }}</span>
-        <span class="cam-meta">{{ t('recap.total_minutes', minutes=total_use_minutes) }}</span>
-      </div>
-      {% if intervals %}
-        <ul style="margin: 10px 0 0; padding: 0; list-style: none; font-size: 0.85rem; line-height: 1.5;">
-          {% for it in intervals %}
-            <li>· {{ (it.start|int)|string }} → {{ (it.end|int)|string }} <em style="color: var(--muted)">({{ t('recap.interval_minutes', minutes=(((it.end - it.start) / 60)|round(1))) }})</em></li>
-          {% endfor %}
-        </ul>
-        <p class="cam-note">{{ t('recap.partial_view') }}</p>
-      {% else %}
-        <p class="cam-note">{{ t('recap.no_activity') }}</p>
-      {% endif %}
-    </section>
-
-    <section class="cam-card">
-      <div class="cam-top">
         <span class="cam-title">🎞️ {{ t('recap.timelapse') }}</span>
       </div>
       <video src="/timelapse?date={{ date }}" controls preload="metadata"
