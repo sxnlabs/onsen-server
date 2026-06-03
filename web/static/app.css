@@ -241,13 +241,8 @@ header h1 {
 }
 .temp .mood { font-size: 2.4rem; align-self: center; line-height: 1; }
 .temp .mood-ok {
-  font-size: 0.8rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: 999px;
-  padding: 5px 9px;
+  font-size: 2rem;
+  filter: saturate(0.95);
 }
 .toggle .lbl .ico { font-size: 1.05rem; }
 
