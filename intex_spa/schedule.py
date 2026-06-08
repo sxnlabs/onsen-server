@@ -36,7 +36,11 @@ DEFAULT_CONFIG: dict = {
 }
 
 MAX_PREHEAT_HOURS = 12.0  # cap pre-heat lead so a slow rate can't heat indefinitely
-HEATER_OFF_OVERSHOOT_C = 1  # keep heat authorized until water reaches setpoint + 1°C
+HEATER_ON_UNDERSHOOT_C = 1  # after heat is off, re-enable only at setpoint - 1°C
+HEATER_ON_UNDERSHOOT_MAX_C = 3
+HEATER_OFF_OVERSHOOT_C = 1  # once heat is on, keep it until setpoint + 1°C
+WEATHER_DEADBAND_MODERATE_C = 15.0
+WEATHER_DEADBAND_COLD_C = 8.0
 
 
 @dataclass
@@ -131,6 +135,8 @@ def _active_setpoint(heat_rules: list, now: datetime, eco: int) -> tuple[int, di
     return best_temp, {
         "kind": "setpoint_rule",
         "temp": best_temp,
+        "rule_weekday": best_dt.weekday(),
+        "rule_time": best_dt.strftime("%H:%M"),
         "rule_at": best_dt.strftime("%a %H:%M"),
     }
 
@@ -156,11 +162,77 @@ def _ready_by_setpoint(ready_by, now, current_temp, rate):
     return best, reason
 
 
+def _normalize_heater_on_undershoot(value: int | float | None) -> int:
+    try:
+        undershoot = int(round(float(value)))
+    except (TypeError, ValueError):
+        undershoot = HEATER_ON_UNDERSHOOT_C
+    return max(HEATER_ON_UNDERSHOOT_C, min(HEATER_ON_UNDERSHOOT_MAX_C, undershoot))
+
+
+def weather_heater_hysteresis(air: float | None, feels: float | None = None) -> dict:
+    """Return the weather-sized heater restart band.
+
+    Weather only widens the restart threshold after heat is off. The cutoff stays
+    tight at setpoint + 1°C so the app never intentionally overheats to compensate.
+    """
+    values = []
+    for value in (air, feels):
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+
+    effective_outdoor = min(values) if values else None
+    if effective_outdoor is None:
+        undershoot = HEATER_ON_UNDERSHOOT_C
+        source = "default"
+    elif effective_outdoor < WEATHER_DEADBAND_COLD_C:
+        undershoot = HEATER_ON_UNDERSHOOT_MAX_C
+        source = "weather"
+    elif effective_outdoor < WEATHER_DEADBAND_MODERATE_C:
+        undershoot = 2
+        source = "weather"
+    else:
+        undershoot = HEATER_ON_UNDERSHOOT_C
+        source = "weather"
+
+    return {
+        "source": source,
+        "air": air,
+        "feels": feels,
+        "effective_outdoor": round(effective_outdoor, 1) if effective_outdoor is not None else None,
+        "heater_on_undershoot": undershoot,
+        "heater_off_overshoot": HEATER_OFF_OVERSHOOT_C,
+    }
+
+
+def _heater_demand(
+    current_temp: int,
+    setpoint: int,
+    current_heater: bool | None = None,
+    *,
+    heater_on_undershoot_c: int | float | None = HEATER_ON_UNDERSHOOT_C,
+) -> bool:
+    on_undershoot = _normalize_heater_on_undershoot(heater_on_undershoot_c)
+    if current_temp <= setpoint - on_undershoot:
+        return True
+    if current_temp >= setpoint + HEATER_OFF_OVERSHOOT_C:
+        return False
+    if current_heater is not None:
+        return bool(current_heater)
+    return current_temp < setpoint
+
+
 def evaluate(
     cfg: dict,
     now: datetime,
     current_temp: int | None,
     heat_rate: float | None = None,
+    current_heater: bool | None = None,
+    heater_on_undershoot_c: int | float | None = HEATER_ON_UNDERSHOOT_C,
 ) -> Desired:
     """Pure: compute the desired spa state for `now`."""
     reasons: list[dict] = []
@@ -179,18 +251,43 @@ def evaluate(
     reasons.append(why)
 
     rb_temp, rb_why = _ready_by_setpoint(cfg["ready_by"], now, current_temp, rate)
+    active_preheat = rb_temp is not None and rb_temp > setpoint
     if rb_temp is not None and rb_temp > setpoint:
         setpoint = rb_temp
         reasons.append(rb_why)
 
-    # Keep the heater function enabled through the setpoint and let the spa's
-    # own thermostat hold temperature. Only cut it once water is 1°C above target.
-    heater_cutoff = setpoint + HEATER_OFF_OVERSHOOT_C
-    heater = current_temp is None or current_temp < heater_cutoff
-    if current_temp < setpoint:
-        reasons.append({"kind": "heating", "current": current_temp, "target": setpoint})
+    # Use a small stateful deadband around the rounded water reading. This avoids
+    # relay chatter when the probe alternates between target and target + 1°C.
+    on_undershoot = (
+        HEATER_ON_UNDERSHOOT_C
+        if active_preheat
+        else _normalize_heater_on_undershoot(heater_on_undershoot_c)
+    )
+    resume_temp = setpoint - on_undershoot
+    heater = _heater_demand(
+        current_temp,
+        setpoint,
+        current_heater,
+        heater_on_undershoot_c=on_undershoot,
+    )
+    if current_temp <= resume_temp:
+        reasons.append({
+            "kind": "heating",
+            "current": current_temp,
+            "target": setpoint,
+            "resume": resume_temp,
+            "undershoot": on_undershoot,
+        })
     elif heater:
         reasons.append({"kind": "at_setpoint", "target": setpoint})
+    elif current_temp < setpoint + HEATER_OFF_OVERSHOOT_C:
+        reasons.append({
+            "kind": "hold_band",
+            "current": current_temp,
+            "target": setpoint,
+            "resume": resume_temp,
+            "undershoot": on_undershoot,
+        })
     else:
         reasons.append({
             "kind": "above_setpoint",
@@ -254,6 +351,8 @@ MIN_RATE = 0.2          # never let the effective rate drop to zero (avoids ∞ 
 MAX_RATE = 2.0          # physical ceiling: ~2.2 kW into ~1100 L ≈ 1.7 °C/h (+margin for
                         # ambient gain). Anything above this is sensor/quantization noise.
 MIN_SEGMENTS = 3        # samples needed on each side before trusting calibration
+MAX_CALIBRATED_GROSS_RATE = 2.5
+MAX_CALIBRATED_LOSS_PER_C = 0.2
 COLD_REF_C = 15.0       # at/above this outside temp, no derate
 COLD_SENS = 0.025       # fractional rate loss per °C below COLD_REF_C
 DERATE_FLOOR = 0.5      # derate never cuts the rate by more than half
@@ -297,10 +396,10 @@ def calibrate_rates(points: list[dict], *, min_segments: int = MIN_SEGMENTS):
     if len(loss) < min_segments or len(heat) < min_segments:
         return None
     k_loss = _median(loss)
-    if k_loss <= 0:
+    if k_loss <= 0 or k_loss > MAX_CALIBRATED_LOSS_PER_C:
         return None
     r_gross = _median([rn + k_loss * gap for rn, gap in heat])
-    if r_gross <= 0:
+    if r_gross <= 0 or r_gross > MAX_CALIBRATED_GROSS_RATE:
         return None
     return round(r_gross, 3), round(k_loss, 4)
 

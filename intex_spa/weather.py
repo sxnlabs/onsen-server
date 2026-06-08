@@ -28,6 +28,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from .concurrency import run_blocking
+
 _LOG = logging.getLogger("intex_spa.weather")
 
 # Defaults — override with WEATHER_LAT / WEATHER_LON env vars in the LaunchAgent.
@@ -74,7 +76,7 @@ class WeatherClient:
         if not force and self._hours and (now - self._fetched_at) < self.ttl:
             return False
         try:
-            payload = await asyncio.to_thread(self._fetch_blocking)
+            payload = await run_blocking(self._fetch_blocking)
             hours = self._parse(payload)
             if hours:
                 self._hours = hours

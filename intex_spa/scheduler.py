@@ -56,6 +56,8 @@ class Scheduler:
         self.cooldown_path = Path(cooldown_path) if cooldown_path else None
         self._overrides: dict[str, float] = {}
         self._auto_changed_at: dict[str, float] = {}
+        self._ignore_observed_until: dict[str, float] = {}
+        self._ready_by_latch: dict | None = None
         self._last_seen_status: dict | None = None
         self._task: asyncio.Task | None = None
         self.last_plan: dict | None = None
@@ -202,6 +204,36 @@ class Scheduler:
         """Latest learned °C/h, or the configured base until the first tick lands."""
         return self.heat_rate or float(self.cfg.get("heat_rate_c_per_h", 1.0))
 
+    async def _weather_inputs(self, now: datetime) -> tuple[float | None, float | None]:
+        if self.weather is None:
+            return None, None
+        now_epoch = now.timestamp()
+        try:
+            await self.weather.refresh(now=now_epoch)
+            end_epoch = now_epoch + self.WEATHER_LOOKAHEAD_H * 3600
+            return (
+                self.weather.air_window(now_epoch, end_epoch),
+                self.weather.air_window(now_epoch, end_epoch, key="feels"),
+            )
+        except Exception:  # noqa: BLE001 — weather is best-effort
+            _LOG.warning("weather refresh failed during tick", exc_info=True)
+            return None, None
+
+    def _plan_hysteresis(self, hysteresis: dict, desired: S.Desired) -> dict:
+        out = dict(hysteresis)
+        if any(
+            isinstance(r, dict) and r.get("kind") in {"preheat", "preheat_latched"}
+            for r in desired.reasons
+        ):
+            out["source"] = "preheat"
+            out["heater_on_undershoot"] = S.HEATER_ON_UNDERSHOOT_C
+        out["resume_temp"] = (
+            desired.setpoint - int(out["heater_on_undershoot"])
+            if desired.setpoint is not None
+            else None
+        )
+        return out
+
     # -- lifecycle ------------------------------------------------------------
     async def start(self) -> None:
         if self._task is None:
@@ -238,16 +270,8 @@ class Scheduler:
         # refresh + read the forecast (best-effort) and size the climb rate from it.
         # Done every tick, before the enabled-gate, so `heat_rate`/`eta` stay fresh
         # for the UI even when automation is off (no spa writes happen here).
-        air = None
-        if self.weather is not None:
-            now_epoch = now.timestamp()
-            try:
-                await self.weather.refresh(now=now_epoch)
-                air = self.weather.air_window(
-                    now_epoch, now_epoch + self.WEATHER_LOOKAHEAD_H * 3600
-                )
-            except Exception:  # noqa: BLE001 — weather is best-effort
-                _LOG.warning("weather refresh failed during tick", exc_info=True)
+        air, feels = await self._weather_inputs(now)
+        hysteresis = S.weather_heater_hysteresis(air, feels)
 
         rate, rate_explain = S.effective_heat_rate(
             points, air, water=current, default=float(cfg.get("heat_rate_c_per_h", 1.0))
@@ -256,12 +280,24 @@ class Scheduler:
         # ETA toward the spa's live setpoint — shown whether or not automation runs
         eta = S.eta_to_setpoint(now, current, status.get("preset_temp"), rate)
 
-        desired = S.evaluate(cfg, now, current, rate)
+        desired = S.evaluate(
+            cfg,
+            now,
+            current,
+            rate,
+            current_heater=status.get("heater"),
+            heater_on_undershoot_c=hysteresis["heater_on_undershoot"],
+        )
+        self._apply_ready_by_latch(now, current, status.get("heater"), desired)
         self._apply_observed_safety(status, desired)
+        plan_hysteresis = self._plan_hysteresis(hysteresis, desired)
+        preheat = S.next_preheat(cfg, now, current, rate)
+        preheat = self._latched_preheat_plan(now, preheat)
 
         if not cfg.get("enabled") and not self._safety_heater_off(desired):
             self.last_plan = {"enabled": False, "heat_rate": rate,
                               "rate_explain": rate_explain, "eta": eta,
+                              "hysteresis": plan_hysteresis,
                               "reasons": [{"kind": "scheduler_disabled"}],
                               "at": now.isoformat()}
             self._remember_status()
@@ -274,7 +310,8 @@ class Scheduler:
             "filter": desired.filter,
             "heat_rate": rate,
             "rate_explain": rate_explain,
-            "preheat": S.next_preheat(cfg, now, current, rate),
+            "hysteresis": plan_hysteresis,
+            "preheat": preheat,
             "eta": eta,
             "weather": self.weather.snapshot(now.timestamp()) if self.weather is not None else None,
             "reasons": desired.reasons,
@@ -311,6 +348,7 @@ class Scheduler:
                 return
             await self.sup.set_field(field, desired_value)
             self._note_auto_change(field)
+            self._ignore_observed_change(field)
 
         try:
             if desired.power and not self._overridden("power") and not st().get("power"):
@@ -321,6 +359,7 @@ class Scheduler:
                 and st().get("preset_temp") != desired.setpoint
             ):
                 await self.sup.set_preset(desired.setpoint)
+                self._ignore_observed_change("preset")
             if (
                 desired.heater is not None
                 and (safety_heater_off or not self._overridden("heater"))
@@ -374,7 +413,16 @@ class Scheduler:
                 "blocked": [],
             }
 
-        desired = S.evaluate(self.cfg, now, status.get("current_temp"), self.current_heat_rate())
+        air, feels = await self._weather_inputs(now)
+        hysteresis = S.weather_heater_hysteresis(air, feels)
+        desired = S.evaluate(
+            self.cfg,
+            now,
+            status.get("current_temp"),
+            self.current_heat_rate(),
+            current_heater=status.get("heater"),
+            heater_on_undershoot_c=hysteresis["heater_on_undershoot"],
+        )
         self._apply_observed_safety(status, desired)
         actions, blocked = self._planned_changes(status, desired)
         return {
@@ -389,6 +437,7 @@ class Scheduler:
                 "setpoint": desired.setpoint,
                 "heater": desired.heater,
                 "filter": desired.filter,
+                "hysteresis": self._plan_hysteresis(hysteresis, desired),
                 "reasons": desired.reasons,
             },
         }
@@ -464,7 +513,10 @@ class Scheduler:
         changed: list[str] = []
         for field in _OBSERVED_FIELDS:
             if self._last_seen_status.get(field) != status.get(field):
-                changed.append(_OVERRIDE_FOR_STATUS_FIELD.get(field, field))
+                key = _OVERRIDE_FOR_STATUS_FIELD.get(field, field)
+                if self._ignore_observed_until.get(key, 0.0) > _time.time():
+                    continue
+                changed.append(key)
         if changed:
             self.note_manual(*changed)
 
@@ -472,6 +524,76 @@ class Scheduler:
         status = (self.sup.state or {}).get("status")
         if status:
             self._last_seen_status = dict(status)
+
+    def _ignore_observed_change(self, field: str) -> None:
+        # A just-issued automation command can echo back on the next poll, or fail
+        # to stick and revert immediately. Neither is a physical-panel override.
+        self._ignore_observed_until[field] = _time.time() + max(
+            self.tick_seconds * 2,
+            self.max_status_age_seconds + self.tick_seconds,
+        )
+
+    def _apply_ready_by_latch(
+        self,
+        now: datetime,
+        current_temp: int | None,
+        current_heater: bool | None,
+        desired: S.Desired,
+    ) -> None:
+        active = next(
+            (
+                r for r in desired.reasons
+                if isinstance(r, dict) and r.get("kind") == "preheat"
+            ),
+            None,
+        )
+        if active is not None:
+            self._ready_by_latch = {
+                "date": now.date().isoformat(),
+                "time": active["for_time"],
+                "temp": int(active["temp"]),
+            }
+
+        latch = self._ready_by_latch
+        if latch is None:
+            return
+        target_dt = datetime.combine(
+            datetime.fromisoformat(latch["date"]).date(),
+            S.parse_hhmm(latch["time"]),
+        )
+        if now > target_dt:
+            self._ready_by_latch = None
+            return
+        if current_temp is None:
+            return
+
+        target = int(latch["temp"])
+        if desired.setpoint is None or desired.setpoint < target:
+            desired.setpoint = target
+        desired.heater = S._heater_demand(current_temp, target, current_heater)
+        desired.filter = True if desired.heater else desired.filter
+        desired.power = True if desired.heater or desired.filter else desired.power
+        if active is None:
+            desired.reasons.append({
+                "kind": "preheat_latched",
+                "temp": target,
+                "for_time": latch["time"],
+            })
+
+    def _latched_preheat_plan(self, now: datetime, preheat: dict | None) -> dict | None:
+        latch = self._ready_by_latch
+        if latch is None:
+            return preheat
+        target_dt = datetime.combine(
+            datetime.fromisoformat(latch["date"]).date(),
+            S.parse_hhmm(latch["time"]),
+        )
+        if now > target_dt:
+            return preheat
+        plan = dict(preheat or {"time": latch["time"], "temp": int(latch["temp"])})
+        plan["active"] = True
+        plan["latched"] = True
+        return plan
 
     def _apply_observed_safety(self, status: dict, desired: S.Desired) -> None:
         if status.get("heater") and not status.get("filter"):

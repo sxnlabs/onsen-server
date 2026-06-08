@@ -4,7 +4,9 @@ The translation bundles are real (loaded from web/translations/*.json), so these
 also catch typos in either bundle that would silently fall back to EN.
 """
 
+import ast
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -47,6 +49,39 @@ def test_bundle_merges_en_under_lang():
     fr = i18n.bundle("fr")
     for key in en:
         assert key in fr, f"missing in merged FR bundle: {key}"
+
+
+def test_algorithm_reason_kinds_are_translated_in_each_lang():
+    root = Path(__file__).resolve().parents[1]
+    kinds = set()
+    for rel in ("intex_spa/schedule.py", "intex_spa/scheduler.py"):
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "kind"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                ):
+                    kinds.add(value.value)
+
+    # Preview actions are rendered elsewhere; scheduler decision reasons use
+    # `algo.<kind>` in schedule.js.
+    kinds -= {"preset", "toggle"}
+    for lang in i18n.LANGS:
+        bundle = i18n._BUNDLES[lang]
+        missing = sorted(f"algo.{kind}" for kind in kinds if f"algo.{kind}" not in bundle)
+        assert not missing, f"missing {lang} algorithm translations: {missing}"
+
+
+def test_setpoint_rule_translation_uses_stable_rule_at_placeholder():
+    for lang in i18n.LANGS:
+        text = i18n.bundle(lang)["algo.setpoint_rule"]
+        assert "{rule_at}" in text
+        assert "{rule_day}" not in text
 
 
 def test_detect_priority_cookie_over_header():

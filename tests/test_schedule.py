@@ -36,16 +36,51 @@ def test_heat_rule_active_sets_point_and_heater():
 
 def test_heater_stays_on_at_setpoint_to_let_spa_thermostat_hold():
     cfg = mk(heat_rules=[{"days": [0, 1, 2, 3, 4, 5, 6], "time": "07:00", "temp": 30}])
-    d = S.evaluate(cfg, at(8), current_temp=30)
+    d = S.evaluate(cfg, at(8), current_temp=30, current_heater=True)
     assert d.setpoint == 30
     assert d.heater is True
     assert d.filter is True
     assert any(r["kind"] == "at_setpoint" for r in d.reasons)
 
 
+def test_heater_stays_off_at_setpoint_until_one_degree_below():
+    cfg = mk(heat_rules=[{"days": [0, 1, 2, 3, 4, 5, 6], "time": "07:00", "temp": 30}])
+    d = S.evaluate(cfg, at(8), current_temp=30, current_heater=False)
+    assert d.setpoint == 30
+    assert d.heater is False
+    hold = next(r for r in d.reasons if r["kind"] == "hold_band")
+    assert hold["resume"] == 29
+
+    d = S.evaluate(cfg, at(8), current_temp=29, current_heater=False)
+    assert d.heater is True
+
+
+def test_weather_hysteresis_can_delay_heater_restart():
+    cfg = mk(heat_rules=[{"days": [0, 1, 2, 3, 4, 5, 6], "time": "07:00", "temp": 30}])
+    d = S.evaluate(
+        cfg,
+        at(8),
+        current_temp=29,
+        current_heater=False,
+        heater_on_undershoot_c=2,
+    )
+    assert d.heater is False
+    hold = next(r for r in d.reasons if r["kind"] == "hold_band")
+    assert hold["resume"] == 28
+
+    d = S.evaluate(
+        cfg,
+        at(8),
+        current_temp=28,
+        current_heater=False,
+        heater_on_undershoot_c=2,
+    )
+    assert d.heater is True
+
+
 def test_heater_off_when_one_degree_above_setpoint():
     cfg = mk(heat_rules=[{"days": [0, 1, 2, 3, 4, 5, 6], "time": "07:00", "temp": 30}])
-    d = S.evaluate(cfg, at(8), current_temp=31)
+    d = S.evaluate(cfg, at(8), current_temp=31, current_heater=True)
     assert d.setpoint == 30
     assert d.heater is False
     assert any(r["kind"] == "above_setpoint" for r in d.reasons)
@@ -71,7 +106,12 @@ def test_eco_fallback_when_no_rules():
 
 def test_heat_rule_wraps_to_previous_day():
     cfg = mk(heat_rules=[{"days": [6], "time": "20:00", "temp": 36}], eco_temp=28)
-    assert S.evaluate(cfg, at(8), current_temp=30).setpoint == 36
+    d = S.evaluate(cfg, at(8), current_temp=30)
+    assert d.setpoint == 36
+    reason = next(r for r in d.reasons if r["kind"] == "setpoint_rule")
+    assert reason["rule_weekday"] == 6
+    assert reason["rule_time"] == "20:00"
+    assert reason["rule_at"] == "Sun 20:00"
 
 
 def test_two_rules_pick_most_recent():
@@ -90,6 +130,22 @@ def test_ready_by_preheat_window_active():
     assert d.setpoint == 38
     assert d.heater is True
     assert any(r["kind"] == "preheat" for r in d.reasons)
+
+
+def test_ready_by_ignores_weather_widened_restart_band():
+    cfg = mk(eco_temp=30, ready_by=[{"days": [0], "time": "10:00", "temp": 35}])
+    d = S.evaluate(
+        cfg,
+        at(9),
+        current_temp=34,
+        heat_rate=1.0,
+        current_heater=False,
+        heater_on_undershoot_c=3,
+    )
+    assert d.setpoint == 35
+    assert d.heater is True
+    heat = next(r for r in d.reasons if r["kind"] == "heating")
+    assert heat["undershoot"] == 1
 
 
 def test_ready_by_uses_base_rate_when_unspecified():
@@ -182,6 +238,21 @@ def test_estimate_heat_rate_default_without_signal():
 
 
 # -- weather-aware heat-rate model --------------------------------------------
+def test_weather_heater_hysteresis_thresholds():
+    default = S.weather_heater_hysteresis(None, None)
+    assert default["source"] == "default"
+    assert default["heater_on_undershoot"] == 1
+
+    cool = S.weather_heater_hysteresis(14.0)
+    assert cool["source"] == "weather"
+    assert cool["effective_outdoor"] == 14.0
+    assert cool["heater_on_undershoot"] == 2
+
+    cold_feels = S.weather_heater_hysteresis(10.0, feels=6.0)
+    assert cold_feels["effective_outdoor"] == 6.0
+    assert cold_feels["heater_on_undershoot"] == 3
+
+
 def _cooling_pts(k_loss, air, start_water, n=5, step_s=900):
     """heater-off samples that fall at k_loss·(water-air)."""
     pts, w = [], float(start_water)
@@ -211,6 +282,21 @@ def test_calibrate_and_predict():
     warm = S.predict_heat_rate(25, 15, r_gross, k_loss)
     cold = S.predict_heat_rate(25, 0, r_gross, k_loss)
     assert cold < warm
+
+
+def test_calibrate_rejects_quantized_sensor_bounces():
+    # Integer sensor steps over one poll interval used to produce impossible
+    # coefficients and then clamp the scheduler to the physical max rate.
+    pts = []
+    for i, cur in enumerate([31, 30, 31, 30, 31, 30, 31]):
+        pts.append({"t": i * 60, "cur": cur, "heat": False, "air": 15})
+    for i, cur in enumerate([30, 31, 30, 31, 30, 31, 30]):
+        pts.append({"t": 1000 + i * 60, "cur": cur, "heat": True, "air": 15})
+
+    assert S.calibrate_rates(pts) is None
+    rate, ex = S.effective_heat_rate(pts, air=14.5, water=32, default=1.2)
+    assert ex["source"] == "weather-derate"
+    assert rate < S.MAX_RATE
 
 
 def test_calibrate_returns_none_without_air():

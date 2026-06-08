@@ -8,8 +8,8 @@ and degrades cleanly: no background tasks start, endpoints return
 + a system `ffmpeg`; optional image-analysis deps live in companion modules with
 guarded imports.
 
-ffmpeg runs as a subprocess from a worker thread (`asyncio.to_thread`) so the
-event loop is never blocked. Each grab writes `state/cam.jpg` atomically
+ffmpeg runs as a subprocess from the shared I/O worker pool so the event loop is
+never blocked. Each grab writes `state/cam.jpg` atomically
 (`tmp + replace`). On any failure the previous frame stays — same
 stale-but-useful pattern as the spa supervisor.
 """
@@ -26,6 +26,8 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from .concurrency import run_blocking
 
 _LOG = logging.getLogger("intex_spa.camera")
 
@@ -155,7 +157,7 @@ class CameraSnapshot:
 
     async def _tick(self) -> None:
         try:
-            ok = await asyncio.to_thread(self._grab_once)
+            ok = await run_blocking(self._grab_once)
         except Exception:  # noqa: BLE001 — never let the loop die
             _LOG.exception("camera: grab raised")
             return
@@ -166,16 +168,16 @@ class CameraSnapshot:
         self.last_error = None
         if now - self._last_archive >= self.timelapse_every:
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(self._archive_frame, now)
+                await run_blocking(self._archive_frame, now)
             self._last_archive = now
         # opportunistic retention sweep (≈ hourly)
         if now - self._last_prune >= 3600:
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(self._prune_history)
+                await run_blocking(self._prune_history)
             self._last_prune = now
         if self.post_grab is not None:
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(self.post_grab, self.frame_path)
+                await run_blocking(self.post_grab, self.frame_path)
 
     # -- ffmpeg -----------------------------------------------------------
     def build_cmd(self, dest: Path) -> list[str]:

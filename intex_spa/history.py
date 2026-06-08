@@ -39,6 +39,7 @@ class TempHistory:
         heater: bool,
         ts: float | None = None,
         air: float | None = None,
+        filter_on: bool | None = None,
     ) -> dict | None:
         """Append a sample if it clears the throttle. Returns the point or None.
 
@@ -61,6 +62,8 @@ class TempHistory:
         }
         if air is not None:
             pt["air"] = round(float(air), 1)
+        if filter_on is not None:
+            pt["filter"] = bool(filter_on)
         self._pts.append(pt)
         pruned = self._prune(now=ts)
         if self.path:

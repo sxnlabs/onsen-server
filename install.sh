@@ -13,6 +13,7 @@ SPA_PORT="${INTEX_SPA_PORT:-8990}"
 POLL="${INTEX_SPA_POLL:-10}"
 BIND="${HERMES_HOST:-127.0.0.1}"   # 0.0.0.0 to expose on the LAN
 PORT="${HERMES_PORT:-8731}"
+IO_THREADS="${HERMES_IO_THREADS:-8}"
 LABEL="com.sxnlabs.spa"
 
 UV="$(command -v uv || true)"
@@ -21,11 +22,11 @@ if [ -z "$UV" ]; then
   exit 1
 fi
 
-echo "→ provisioning venv (uv sync, incl. dev for the smoke test)"
+echo "→ provisioning venv (uv sync, incl. dev for the smoke test + camera extras)"
 # .python-version pins CPython 3.12. Don't bump to 3.14 without testing the service
 # under launchd for ≥30 min — uvicorn[standard] pulls uvloop/httptools/pydantic-core
 # (all native), and 3.14 produced silent ~30s deaths with no traceback on this machine.
-uv sync --extra dev
+uv sync --extra dev --extra camera
 
 echo "→ smoke test (offline)"
 uv run python -m pytest -q
@@ -60,6 +61,7 @@ sed -e "s#__UV__#${UV}#g" \
     -e "s#__SPA_HOST__#${SPA_HOST}#g" \
     -e "s#__SPA_PORT__#${SPA_PORT}#g" \
     -e "s#__POLL__#${POLL}#g" \
+    -e "s#__IO_THREADS__#${IO_THREADS}#g" \
     -e "s#__PATH__#${PATHV}#g" \
     com.sxnlabs.spa.plist.tmpl > "$PLIST"
 
@@ -76,6 +78,7 @@ echo
 echo "✓ $LABEL installed"
 echo "  UI:    http://${BIND}:${PORT}"
 echo "  spa:   ${SPA_HOST}:${SPA_PORT}  (poll ${POLL}s)"
+echo "  I/O:   ${IO_THREADS} worker threads"
 echo "  logs:  ${WORKDIR}/state/spa.err.log"
 echo
 echo "  uninstall:  launchctl bootout gui/$(id -u)/$LABEL && rm '$PLIST'"

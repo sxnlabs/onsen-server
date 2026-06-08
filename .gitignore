@@ -1,6 +1,9 @@
 .venv/
+server/.venv/
+.DS_Store
 __pycache__/
 *.pyc
 .pytest_cache/
 state/
+server/state/
 *.log

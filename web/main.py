@@ -11,6 +11,9 @@ that return the same partial. A Chart.js graph reads /history.
 
 Optional auth: set HERMES_PASSWORD to gate the UI behind a signed-cookie login. This
 protects the web UI only — NOT the spa's open TCP port (lock that down at the firewall).
+
+HTTP concurrency is async in the single uvicorn process. Blocking side work uses a
+bounded I/O thread pool, so camera/weather/timelapse tasks don't stall the API.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import datetime as _dt
 import json as _json
 import os
 import time as _time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -34,6 +37,7 @@ from intex_spa import camera as cam_mod
 from intex_spa import protocol
 from intex_spa.client import SpaUnreachable
 from intex_spa.command_log import CommandLog
+from intex_spa.concurrency import configure_io_threads, reset_io_threads, run_blocking
 from intex_spa.history import TempHistory
 from intex_spa import schedule as sched_mod
 from intex_spa.scheduler import Scheduler
@@ -77,6 +81,170 @@ def _load_cover_state(path: str | Path) -> dict | None:
         return None
 
 
+def _intervals_from_points(
+    points: list[dict],
+    key: str,
+    start: float,
+    end: float,
+) -> list[dict]:
+    intervals: list[dict] = []
+    active = False
+    active_start = start
+    for p in points:
+        if key not in p:
+            continue
+        try:
+            t = float(p["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        value = bool(p.get(key))
+        if value and not active:
+            active = True
+            active_start = max(start, t)
+        elif not value and active:
+            intervals.append({"start": active_start, "end": min(end, t)})
+            active = False
+    if active:
+        intervals.append({"start": active_start, "end": end})
+    return [i for i in intervals if i["end"] > i["start"]]
+
+
+def _intervals_from_command_log(
+    path: str | Path | None,
+    fields: set[str],
+    start: float,
+    end: float,
+    extra_events: dict[str, list[tuple[float, bool]]] | None = None,
+) -> dict[str, list[dict]]:
+    out = {field: [] for field in fields}
+    events: list[tuple[float, int, str, bool]] = []
+    for field, field_events in (extra_events or {}).items():
+        if field not in fields:
+            continue
+        for t, value in field_events:
+            if start <= t <= end:
+                events.append((t, 1, field, value))
+    if path is None:
+        return _intervals_from_transition_events(out, events, start, end, fields)
+    p = Path(path)
+    if not p.exists():
+        return _intervals_from_transition_events(out, events, start, end, fields)
+
+    before: dict[str, bool | None] = {field: None for field in fields}
+    try:
+        lines = p.read_text().splitlines()
+    except OSError:
+        return _intervals_from_transition_events(out, events, start, end, fields)
+
+    for line in lines:
+        try:
+            row = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if row.get("kind") != "toggle" or row.get("field") not in fields:
+            continue
+        after = row.get("after")
+        field = row["field"]
+        if not isinstance(after, dict) or field not in after:
+            continue
+        try:
+            t = float(row["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        value = bool(after[field])
+        if t < start:
+            before[field] = value
+        elif t <= end:
+            events.append((t, 0, field, value))
+
+    return _intervals_from_transition_events(out, events, start, end, fields, before)
+
+
+def _intervals_from_transition_events(
+    out: dict[str, list[dict]],
+    events: list[tuple[float, int, str, bool]],
+    start: float,
+    end: float,
+    fields: set[str],
+    before: dict[str, bool | None] | None = None,
+) -> dict[str, list[dict]]:
+    before = before or {field: None for field in fields}
+    active_since: dict[str, float | None] = {
+        field: start if before[field] is True else None for field in fields
+    }
+    for t, _priority, field, value in sorted(events):
+        if value and active_since[field] is None:
+            active_since[field] = max(start, t)
+        elif not value and active_since[field] is not None:
+            out[field].append({"start": active_since[field], "end": min(end, t)})
+            active_since[field] = None
+    for field, since in active_since.items():
+        if since is not None:
+            out[field].append({"start": since, "end": end})
+    return out
+
+
+def _events_from_points(points: list[dict], key: str) -> list[tuple[float, bool]]:
+    events: list[tuple[float, bool]] = []
+    for p in points:
+        if key not in p:
+            continue
+        try:
+            events.append((float(p["t"]), bool(p[key])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return events
+
+
+def _merge_intervals(*groups: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    intervals = sorted(
+        (
+            {"start": float(i["start"]), "end": float(i["end"])}
+            for group in groups
+            for i in group
+            if i.get("end") is not None and i.get("start") is not None
+        ),
+        key=lambda i: i["start"],
+    )
+    for interval in intervals:
+        if interval["end"] <= interval["start"]:
+            continue
+        if not merged or interval["start"] > merged[-1]["end"]:
+            merged.append(interval)
+        else:
+            merged[-1]["end"] = max(merged[-1]["end"], interval["end"])
+    return merged
+
+
+def _history_activity(
+    points: list[dict],
+    command_log_path: str | Path | None,
+) -> dict[str, list[dict]]:
+    if not points:
+        return {"heater": [], "filter": []}
+    start = float(points[0]["t"])
+    end = float(points[-1]["t"])
+    from_points = {
+        "heater": _intervals_from_points(points, "heat", start, end),
+        "filter": _intervals_from_points(points, "filter", start, end),
+    }
+    from_commands = _intervals_from_command_log(
+        command_log_path,
+        {"heater", "filter"},
+        start,
+        end,
+        extra_events={
+            "heater": _events_from_points(points, "heat"),
+            "filter": _events_from_points(points, "filter"),
+        },
+    )
+    return {
+        "heater": _merge_intervals(from_points["heater"], from_commands["heater"]),
+        "filter": _merge_intervals(from_points["filter"], from_commands["filter"]),
+    }
+
+
 def create_app(
     host: str,
     *,
@@ -95,6 +263,7 @@ def create_app(
     manual_override_path: str | None = "state/manual_overrides.json",
     pause_path: str | None = "state/pause.json",
     automation_cooldown_path: str | None = "state/automation_cooldowns.json",
+    io_threads: int | None = 8,
 ) -> FastAPI:
     weather = (
         WeatherClient(weather_lat, weather_lon, cache_path=weather_cache_path)
@@ -102,13 +271,14 @@ def create_app(
         else None
     )
     history = TempHistory(path=history_path)
+    command_log = CommandLog(command_log_path)
     supervisor = Supervisor(
         host,
         port=port,
         poll_interval=poll_interval,
         history=history,
         air_provider=(weather.air_now if weather else None),
-        command_log=CommandLog(command_log_path),
+        command_log=command_log,
         pause_path=pause_path,
     )
     scheduler = Scheduler(
@@ -160,21 +330,28 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        if weather is not None:
-            # warm the forecast in the background — never block startup on the network
-            # (the scheduler tick also refreshes; air_now() returns None until it lands)
-            asyncio.create_task(weather.refresh(force=True))
-        await supervisor.start()
-        await scheduler.start()
-        if camera is not None:
-            await camera.start()
+        configure_io_threads(io_threads)
+        weather_warmup: asyncio.Task | None = None
         try:
+            if weather is not None:
+                # warm the forecast in the background — never block startup on the network
+                # (the scheduler tick also refreshes; air_now() returns None until it lands)
+                weather_warmup = asyncio.create_task(weather.refresh(force=True))
+            await supervisor.start()
+            await scheduler.start()
+            if camera is not None:
+                await camera.start()
             yield
         finally:
+            if weather_warmup is not None:
+                weather_warmup.cancel()
+                with suppress(asyncio.CancelledError):
+                    await weather_warmup
             if camera is not None:
                 await camera.stop()
             await scheduler.stop()
             await supervisor.stop()
+            reset_io_threads()
 
     app = FastAPI(title="Intex Spa", lifespan=lifespan)
     app.state.supervisor = supervisor
@@ -383,7 +560,12 @@ def create_app(
     async def history_json(hours: float = 24.0, max_points: int | None = None):
         unit = (supervisor.state.get("status") or {}).get("unit") or "C"
         points = supervisor.history.recent(hours=hours)
-        return {"unit": unit, "points": _decimate_points(points, max_points)}
+        command_log_path = command_log.path if command_log is not None else None
+        return {
+            "unit": unit,
+            "points": _decimate_points(points, max_points),
+            "activity": _history_activity(points, command_log_path),
+        }
 
     @app.get("/weather")
     async def weather_json():
@@ -395,6 +577,7 @@ def create_app(
         # is doing right now (structured reasons + technical rate breakdown).
         plan = scheduler.last_plan or {}
         snap["rate_explain"] = plan.get("rate_explain")
+        snap["hysteresis"] = plan.get("hysteresis")
         snap["preheat"] = plan.get("preheat")
         snap["plan"] = {
             "enabled": plan.get("enabled", False),
@@ -538,7 +721,7 @@ def create_app(
         from intex_spa import cover_detect
 
         try:
-            luma, std = await asyncio.to_thread(
+            luma, std = await run_blocking(
                 cover_detect.sample, camera_config["frame_path"], roi,
             )
         except FileNotFoundError:
@@ -551,7 +734,7 @@ def create_app(
         camera_config[f"cover_baseline_{state}"] = baseline
         cam_mod.save_config(app.state.camera_config_path, camera_config)
         # re-classify immediately so the UI badge updates without waiting for next poll
-        await asyncio.to_thread(_classify_cover, camera_config["frame_path"])
+        await run_blocking(_classify_cover, camera_config["frame_path"])
         return {
             "ok": True,
             "state": state,
@@ -579,7 +762,7 @@ def create_app(
         forced = state if state in ("on", "off") else None
         camera_config["cover_forced_state"] = forced
         cam_mod.save_config(app.state.camera_config_path, camera_config)
-        await asyncio.to_thread(_classify_cover, camera_config["frame_path"])
+        await run_blocking(_classify_cover, camera_config["frame_path"])
         return {"ok": True, "forced_state": forced}
 
     @app.get("/timelapse")
@@ -590,7 +773,7 @@ def create_app(
             _dt.datetime.strptime(date, "%Y-%m-%d")
         except ValueError:
             raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
-        mp4 = await asyncio.to_thread(camera.generate_timelapse, date)
+        mp4 = await run_blocking(camera.generate_timelapse, date)
         if mp4 is None:
             raise HTTPException(status_code=404, detail=f"no frames for {date}")
         return FileResponse(str(mp4), media_type="video/mp4")
@@ -659,6 +842,15 @@ def _configured_password() -> str | None:
     return None
 
 
+def _configured_io_threads() -> int:
+    raw = os.environ.get("HERMES_IO_THREADS", "8")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 8
+    return max(1, value)
+
+
 def make_app() -> FastAPI:
     """uvicorn --factory entry point. Reads config from the environment."""
     host = os.environ.get("INTEX_SPA_HOST")
@@ -672,4 +864,5 @@ def make_app() -> FastAPI:
         weather_enabled=os.environ.get("WEATHER_ENABLED", "1") not in ("0", "false", "no", ""),
         weather_lat=float(os.environ.get("WEATHER_LAT", DEFAULT_LAT)),
         weather_lon=float(os.environ.get("WEATHER_LON", DEFAULT_LON)),
+        io_threads=_configured_io_threads(),
     )

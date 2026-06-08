@@ -18,7 +18,34 @@
     filter: { days: [0, 1, 2, 3, 4, 5, 6], start: "07:00", end: "10:00" },
     ready: { days: [5, 6], time: "10:00", temp: 36 },
   };
+  var WEEKDAY_INDEX = {
+    Mon: 0, Monday: 0,
+    Tue: 1, Tues: 1, Tuesday: 1,
+    Wed: 2, Wednesday: 2,
+    Thu: 3, Thur: 3, Thurs: 3, Thursday: 3,
+    Fri: 4, Friday: 4,
+    Sat: 5, Saturday: 5,
+    Sun: 6, Sunday: 6,
+  };
   var $ = function (s) { return document.querySelector(s); };
+
+  function localizedRuleParts(r) {
+    var day = "";
+    var time = r.rule_time == null ? "" : String(r.rule_time);
+    if (r.rule_weekday != null) {
+      day = T('weekday.short.' + r.rule_weekday);
+    } else if (r.rule_at != null) {
+      var bits = String(r.rule_at).trim().split(/\s+/);
+      var idx = WEEKDAY_INDEX[bits[0]];
+      if (idx != null) {
+        day = T('weekday.short.' + idx);
+        if (!time) time = bits.slice(1).join(" ");
+      }
+    }
+    var fallback = r.rule_at == null ? "" : String(r.rule_at);
+    var at = day && time ? day + " " + time : (day || time || fallback);
+    return { day: day, time: time, at: at };
+  }
 
   function chips(days) {
     return '<div class="days">' + DAYS.map(function (l, i) {
@@ -161,6 +188,12 @@
           // the line stays readable.
           var params = {};
           for (var k in r) params[k] = (r[k] == null ? '—' : r[k]);
+          if (r.kind === 'setpoint_rule') {
+            var rule = localizedRuleParts(r);
+            params.rule_day = rule.day;
+            params.rule_time = rule.time;
+            params.rule_at = rule.at;
+          }
           var li = document.createElement('li');
           li.textContent = T('algo.' + r.kind, params);
           ul.appendChild(li);
@@ -189,7 +222,15 @@
       var key = ph.active ? 'weather.preheat_active' : 'weather.preheat_inactive';
       pe.textContent = T(key, {temp: ph.temp, time: ph.time, start: ph.start, lead_h: ph.lead_h});
     } else { pe.textContent = ""; }
-    $("#wx-note").textContent = T('weather.note');
+    var note = T('weather.note');
+    var hx = w.hysteresis;
+    if (hx && hx.heater_on_undershoot > 1 && hx.resume_temp != null) {
+      note += " " + T('weather.hysteresis', {
+        delta: hx.heater_on_undershoot,
+        resume: hx.resume_temp,
+      });
+    }
+    $("#wx-note").textContent = note;
   }
 
   async function loadAll() {

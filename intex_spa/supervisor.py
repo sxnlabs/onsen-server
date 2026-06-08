@@ -108,7 +108,11 @@ class Supervisor:
                     except Exception:  # noqa: BLE001 — weather is best-effort
                         air = None
                 self.history.record(
-                    kept["current_temp"], kept.get("preset_temp"), kept.get("heater"), air=air
+                    kept["current_temp"],
+                    kept.get("preset_temp"),
+                    kept.get("heater"),
+                    air=air,
+                    filter_on=kept.get("filter"),
                 )
             except Exception:  # noqa: BLE001 — history is best-effort, never break a refresh
                 _LOG.exception("history record failed (non-fatal)")

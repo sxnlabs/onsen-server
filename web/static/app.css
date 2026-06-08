@@ -327,12 +327,31 @@ header h1 {
   font-size: 0.9rem; font-weight: 600; color: var(--muted);
   text-transform: uppercase; letter-spacing: 0.06em;
 }
-.chart-head .range { display: inline-flex; gap: 4px; }
+.chart-head .range { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .range-btn {
   border: 1px solid var(--card-hi); background: transparent; color: var(--muted);
   font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; cursor: pointer;
 }
 .range-btn.active { background: var(--card-hi); color: var(--fg); }
+.chart-activity-legend {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 6px;
+  min-height: 16px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.chart-activity-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-activity-legend i {
+  display: inline-block;
+  width: 18px;
+  height: 5px;
+  border-radius: 999px;
+}
+.chart-activity-legend i.heat { background: #ef4444; }
+.chart-activity-legend i.filter { background: #2563eb; }
 
 /* weather + algorithm explainer card */
 .weather-card { background: var(--card); border-radius: var(--radius); padding: 18px; margin-top: 16px; box-shadow: var(--shadow); }

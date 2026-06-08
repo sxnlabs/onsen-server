@@ -1,13 +1,14 @@
 """HTTP-level tests for the FastAPI app, end-to-end against the fake spa."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 
 import httpx
 import pytest
 
 from fake_spa import FakeSpa
-from web.main import create_app
+from web.main import create_app, _history_activity
 
 
 @asynccontextmanager
@@ -332,10 +333,52 @@ async def test_history_endpoint():
         # the initial refresh in app_for recorded one sample
         assert len(body["points"]) >= 1
         assert body["points"][-1]["cur"] == 19
+        assert body["points"][-1]["filter"] is False
+        assert body["activity"] == {"heater": [], "filter": []}
         # the 7-day window the UI defaults to is served by the same endpoint
         r2 = await client.get("/history?hours=168")
         assert r2.status_code == 200
         assert len(r2.json()["points"]) >= 1
+
+
+def test_history_activity_reconstructs_command_intervals(tmp_path):
+    log = tmp_path / "commands.jsonl"
+    rows = [
+        {"t": 1100, "kind": "toggle", "field": "filter", "after": {"filter": True}},
+        {"t": 1400, "kind": "toggle", "field": "filter", "after": {"filter": False}},
+    ]
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    points = [
+        {"t": 1000.0, "cur": 32, "set": 25, "heat": False},
+        {"t": 1200.0, "cur": 32, "set": 25, "heat": True},
+        {"t": 1300.0, "cur": 33, "set": 25, "heat": True},
+        {"t": 1500.0, "cur": 33, "set": 25, "heat": False},
+    ]
+
+    activity = _history_activity(points, log)
+
+    assert activity["heater"] == [{"start": 1200.0, "end": 1500.0}]
+    assert activity["filter"] == [{"start": 1100.0, "end": 1400.0}]
+
+
+def test_history_activity_point_state_can_close_command_interval(tmp_path):
+    log = tmp_path / "commands.jsonl"
+    log.write_text(json.dumps({
+        "t": 1100,
+        "kind": "toggle",
+        "field": "filter",
+        "after": {"filter": True},
+    }) + "\n")
+    points = [
+        {"t": 1000.0, "cur": 32, "set": 25, "heat": False},
+        {"t": 1200.0, "cur": 32, "set": 25, "heat": False},
+        {"t": 1500.0, "cur": 33, "set": 25, "heat": False, "filter": False},
+        {"t": 1600.0, "cur": 33, "set": 25, "heat": False, "filter": False},
+    ]
+
+    activity = _history_activity(points, log)
+
+    assert activity["filter"] == [{"start": 1100.0, "end": 1500.0}]
 
 
 async def test_history_endpoint_can_decimate_for_chart():

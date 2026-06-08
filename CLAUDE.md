@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Single-process FastAPI web app that replaces the Intex iOS app for an Intex PureSpa (Baltik) on the LAN. Talks raw TCP to the spa's wifi module on port 8990. No cloud, no vendor SDK, protocol reverse-engineered from `mathieu-mp/aio-intex-spa` and validated against the real device (<spa-ip>). The README is the canonical product spec — read it before this file for context.
+This repo is the Onsen **server**. The project is split across three locations: the server (here, `~/Workspace/SXN-Labs/onsen`), the native iOS/watchOS app (`~/Workspace/Apps/Onsen`), and the specs (`~/Specs/Onsen`). The server is the single-process FastAPI runtime that replaces the Intex iOS app for an Intex PureSpa (Baltik) on the LAN. It talks raw TCP to the spa's wifi module on port 8990. No cloud, no vendor SDK, protocol reverse-engineered from `mathieu-mp/aio-intex-spa` and validated against the real device (<spa-ip>). `~/Specs/Onsen/server.md` is the canonical server product spec — read it before this file for context.
 
 ## Commands
 
 ```bash
+# run from the repo root
+
+# first local provision
+uv sync --extra dev --extra camera
+
 # dev (auto-reload, single process)
 INTEX_SPA_HOST=<spa-ip> uv run uvicorn web.main:make_app --factory --reload
 
@@ -26,7 +31,7 @@ python3 probe.py --selftest
 INTEX_SPA_HOST=<spa-ip> ./install.sh
 ```
 
-Test config lives in `pyproject.toml`: `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed), `pythonpath = [".", "tests"]`.
+Server test config lives in `pyproject.toml`: `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed), `pythonpath = [".", "tests"]`. Run these commands from the repo root.
 
 ## Architecture — the invariants that drive every design choice
 
@@ -42,7 +47,7 @@ Test config lives in `pyproject.toml`: `asyncio_mode = "auto"` (no `@pytest.mark
 
 **Manual override window.** UI actions call `scheduler.note_manual(field)` to set a 60-min per-field freeze so the scheduler doesn't immediately revert a hand toggle. Any new write path from the UI must do the same.
 
-**Python is pinned to 3.12 via `.python-version`.** CPython 3.14 silently killed the service after ~30 s under launchd on this machine (uvicorn's native deps — `uvloop`/`httptools`/`pydantic-core` — produced a segfault with no Python traceback). Don't bump the interpreter without first running the LaunchAgent for ≥30 min and checking `~/Library/Logs/DiagnosticReports/` for fresh Python `.ips` files. See README "Design constraints" for the full story.
+**Python is pinned to 3.12 via `.python-version`.** CPython 3.14 silently killed the service after ~30 s under launchd on this machine (uvicorn's native deps — `uvloop`/`httptools`/`pydantic-core` — produced a segfault with no Python traceback). Don't bump the interpreter without first running the LaunchAgent for ≥30 min and checking `~/Library/Logs/DiagnosticReports/` for fresh Python `.ips` files. See `~/Specs/Onsen/server.md` "Design constraints" for the full story.
 
 ### Layered structure
 

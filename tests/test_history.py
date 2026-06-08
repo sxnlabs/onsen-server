@@ -45,6 +45,12 @@ def test_air_stored_when_provided():
     assert "air" not in p2
 
 
+def test_filter_state_stored_when_provided():
+    h = TempHistory(path=None, min_interval=0)
+    p = h.record(19, 37, False, ts=1000, filter_on=True)
+    assert p["filter"] is True
+
+
 def test_recent_filters_by_window():
     h = TempHistory(path=None, min_interval=0)
     h.record(18, 37, False, ts=1000)

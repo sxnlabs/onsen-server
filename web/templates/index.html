@@ -45,11 +45,17 @@
       <div class="chart-head">
         <span>🌡️ {{ t('chart.title') }}</span>
         <span class="range">
+          <button type="button" class="range-btn" data-hours="6">{{ t('chart.range_6h') }}</button>
+          <button type="button" class="range-btn" data-hours="12">{{ t('chart.range_12h') }}</button>
           <button type="button" class="range-btn" data-hours="24">{{ t('chart.range_24h') }}</button>
           <button type="button" class="range-btn active" data-hours="168">{{ t('chart.range_7d') }}</button>
         </span>
       </div>
       <div class="chart-wrap" id="chart-wrap"><canvas id="tempChart"></canvas></div>
+      <div class="chart-activity-legend" id="chart-activity-legend">
+        <span><i class="heat"></i>{{ t('chart.heater') }}</span>
+        <span><i class="filter"></i>{{ t('chart.filter') }}</span>
+      </div>
       <p class="chart-empty" id="chart-empty">{{ t('chart.empty') }}</p>
         </section>
 
@@ -206,6 +212,34 @@
       var water = (css.getPropertyValue('--accent') || '#38bdf8').trim();
       var muted = (css.getPropertyValue('--muted') || '#8a93ad').trim();
       var airc = '#f59e0b'; // outside air (amber)
+      var heatc = '#ef4444';
+      var filterc = '#2563eb';
+
+      var activityPlugin = {
+        id: 'spaActivity',
+        beforeDatasetsDraw: function (chart, args, opts) {
+          var activity = (opts && opts.activity) || {};
+          var area = chart.chartArea;
+          var x = chart.scales.x;
+          if (!area || !x) return;
+          var ctx = chart.ctx;
+          function lane(intervals, y, color) {
+            if (!intervals || !intervals.length) return;
+            ctx.save();
+            ctx.fillStyle = color;
+            ctx.globalAlpha = 0.72;
+            intervals.forEach(function (it) {
+              var left = Math.max(area.left, x.getPixelForValue(it.start * 1000));
+              var right = Math.min(area.right, x.getPixelForValue(it.end * 1000));
+              if (right > left) ctx.fillRect(left, y, right - left, 5);
+            });
+            ctx.restore();
+          }
+          lane(activity.heater, area.bottom - 18, opts.heatColor || heatc);
+          lane(activity.filter, area.bottom - 10, opts.filterColor || filterc);
+        }
+      };
+      if (window.Chart) Chart.register(activityPlugin);
 
       function pad(n) { return ('0' + n).slice(-2); }
       function fmtTick(ms) {
@@ -217,6 +251,9 @@
         var d = new Date(ms);
         return pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + ' ' +
                pad(d.getHours()) + ':' + pad(d.getMinutes());
+      }
+      function isActiveAt(intervals, seconds) {
+        return (intervals || []).some(function (it) { return it.start <= seconds && seconds <= it.end; });
       }
 
       async function load() {
@@ -240,6 +277,7 @@
         var set_data = pts.map(function (p) { return { x: p.t * 1000, y: p.set }; });
         var air_data = pts.map(function (p) { return { x: p.t * 1000, y: (p.air == null ? null : p.air) }; });
         var has_air = pts.some(function (p) { return p.air != null; });
+        var activity = j.activity || { heater: [], filter: [] };
 
         var datasets = [
           { label: T('chart.water'), data: water_data, borderColor: water,
@@ -265,8 +303,18 @@
                           callback: function (v) { return v + unit; } } }
           },
           plugins: {
+            spaActivity: { activity: activity, heatColor: heatc, filterColor: filterc },
             legend: { labels: { color: muted, boxWidth: 12, usePointStyle: true } },
-            tooltip: { callbacks: { title: function (it) { return fmtFull(it[0].parsed.x); } } }
+            tooltip: { callbacks: {
+              title: function (it) { return fmtFull(it[0].parsed.x); },
+              afterBody: function (it) {
+                var s = it[0].parsed.x / 1000;
+                return [
+                  T('chart.heater') + ': ' + T(isActiveAt(activity.heater, s) ? 'toggle.on' : 'toggle.off'),
+                  T('chart.filter') + ': ' + T(isActiveAt(activity.filter, s) ? 'toggle.on' : 'toggle.off')
+                ];
+              }
+            } }
           }
         };
         if (chart) { chart.data = data; chart.options = opts; chart.update('none'); }
@@ -281,7 +329,7 @@
         var btns = document.querySelectorAll('.range-btn');
         btns.forEach(function (b) {
           b.addEventListener('click', function () {
-            rangeHours = parseInt(b.getAttribute('data-hours'), 10);
+            rangeHours = parseFloat(b.getAttribute('data-hours'));
             btns.forEach(function (x) { x.classList.toggle('active', x === b); });
             load();
           });

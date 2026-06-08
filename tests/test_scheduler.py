@@ -31,8 +31,9 @@ async def _teardown(spa, sup):
 class _FakeWeather:
     """Minimal stand-in for WeatherClient: always reports a fixed cold air temp."""
 
-    def __init__(self, air):
+    def __init__(self, air, feels=None):
         self.air = air
+        self.feels = feels
         self.refreshed = False
 
     async def refresh(self, *, now=None, force=False):
@@ -40,13 +41,16 @@ class _FakeWeather:
         return True
 
     def air_window(self, start, end, key="air"):
-        return self.air
+        return self.feels if key == "feels" and self.feels is not None else self.air
 
     def air_now(self, now=None):
         return self.air
 
     def snapshot(self, now=None):
-        return {"source": "fake", "air": self.air, "low_12h": self.air, "hours": 24}
+        snap = {"source": "fake", "air": self.air, "low_12h": self.air, "hours": 24}
+        if self.feels is not None:
+            snap["feels"] = self.feels
+        return snap
 
 
 async def test_weather_feeds_rate_explain_into_plan(tmp_path):
@@ -109,6 +113,67 @@ async def test_at_setpoint_keeps_heater_authorized_without_toggle(tmp_path):
         assert spa.state["filter"] is True
         assert "heater" not in spa.intents[1:]
         assert "filter" not in spa.intents[1:]
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_at_setpoint_does_not_restart_heater_once_off(tmp_path):
+    cfg = {"enabled": True, "heat_rules": [
+        {"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 25}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 25, "preset_temp": 25,
+                   "filter": False, "heater": False})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999)
+    try:
+        await sch.tick_once(now=MON.replace(hour=1))
+        assert sch.last_plan["heater"] is False
+        assert spa.state["heater"] is False
+        assert spa.state["filter"] is False
+        assert "heater" not in spa.intents[1:]
+        assert "filter" not in spa.intents[1:]
+
+        spa.state["current_temp"] = 24
+        await sup.refresh()
+        await sch.tick_once(now=MON.replace(hour=2))
+        assert sch.last_plan["heater"] is True
+        assert spa.state["heater"] is True
+        assert spa.state["filter"] is True
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_cold_weather_widens_heater_restart_band(tmp_path):
+    cfg = {"enabled": True, "heat_rules": [
+        {"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 25}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 24, "preset_temp": 25,
+                   "filter": False, "heater": False})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999)
+    sch.weather = _FakeWeather(air=10.0)
+    try:
+        await sch.tick_once(now=MON.replace(hour=1))
+        assert sch.last_plan["hysteresis"]["heater_on_undershoot"] == 2
+        assert sch.last_plan["hysteresis"]["resume_temp"] == 23
+        assert sch.last_plan["heater"] is False
+        assert spa.state["heater"] is False
+        assert spa.state["filter"] is False
+        assert "heater" not in spa.intents[1:]
+        assert "filter" not in spa.intents[1:]
+
+        spa.state["current_temp"] = 23
+        await sup.refresh()
+        await sch.tick_once(now=MON.replace(hour=2))
+        assert sch.last_plan["heater"] is True
+        assert spa.state["heater"] is True
+        assert spa.state["filter"] is True
     finally:
         await _teardown(spa, sup)
 
@@ -333,13 +398,38 @@ async def test_physical_panel_change_gets_manual_override(tmp_path):
         await sch.tick_once(now=MON.replace(hour=8))
         assert spa.state["heater"] is True
 
-        # Simulate the user pressing the spa's own control panel.
+        # Simulate the user pressing the spa's own control panel after the
+        # automation command has settled.
+        sch._ignore_observed_until.clear()
         spa.state["heater"] = False
         await sup.refresh()
         await sch.tick_once(now=MON.replace(hour=8, minute=1))
 
         assert spa.state["heater"] is False
         assert sch._overridden("heater") is True
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_auto_command_reversion_does_not_create_manual_override(tmp_path):
+    cfg = {"enabled": True, "heat_rules": [
+        {"days": [0, 1, 2, 3, 4, 5, 6], "time": "00:00", "temp": 39}]}
+    spa, sup, sch = await _setup(tmp_path, cfg=cfg)
+    sch.min_automation_toggle_seconds = 600
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert spa.state["heater"] is True
+
+        # Model the real controller reporting the heater back off immediately
+        # after an automated toggle. That should be retried after cooldown, not
+        # mistaken for a one-hour physical-panel override.
+        spa.state["heater"] = False
+        await sup.refresh()
+        await sch.tick_once(now=MON.replace(hour=8, minute=1))
+
+        assert spa.state["heater"] is False
+        assert "heater" not in sch.manual_overrides_remaining()
+        assert sch._overridden("heater") is False
     finally:
         await _teardown(spa, sup)
 
@@ -352,6 +442,56 @@ async def test_ready_by_preheats(tmp_path):
         await sch.tick_once(now=MON.replace(hour=9))
         assert spa.state["preset_temp"] == 38
         assert spa.state["heater"] is True
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_ready_by_keeps_tight_restart_band_in_cold_weather(tmp_path):
+    cfg = {"enabled": True, "eco_temp": 25, "heat_rate_c_per_h": 1.0,
+           "ready_by": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "10:00", "temp": 35}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 34, "preset_temp": 25,
+                   "filter": False, "heater": False})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999)
+    sch.weather = _FakeWeather(air=2.0)
+    try:
+        await sch.tick_once(now=MON.replace(hour=9))
+        assert sch.last_plan["hysteresis"]["source"] == "preheat"
+        assert sch.last_plan["hysteresis"]["heater_on_undershoot"] == 1
+        assert sch.last_plan["heater"] is True
+        assert spa.state["heater"] is True
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_ready_by_stays_latched_after_preheat_starts(tmp_path):
+    cfg = {"enabled": True, "eco_temp": 25, "heat_rate_c_per_h": 2.0,
+           "ready_by": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "18:00", "temp": 36}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 30, "preset_temp": 25})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999)
+    try:
+        await sch.tick_once(now=MON.replace(hour=15, minute=10))
+        assert spa.state["preset_temp"] == 36
+
+        # With a 2 °C/h estimate, 31→36 would normally move the start to 15:30
+        # and drop back to eco. Once started, ready-by must be monotone.
+        spa.state["current_temp"] = 31
+        await sup.refresh()
+        await sch.tick_once(now=MON.replace(hour=15, minute=11))
+
+        assert spa.state["preset_temp"] == 36
+        assert sch.last_plan["preheat"]["active"] is True
+        assert sch.last_plan["preheat"]["latched"] is True
+        assert any(r["kind"] == "preheat_latched" for r in sch.last_plan["reasons"])
     finally:
         await _teardown(spa, sup)
 
