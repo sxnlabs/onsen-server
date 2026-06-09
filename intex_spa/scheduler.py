@@ -26,6 +26,8 @@ _OVERRIDE_KEYS = {"power", "preset", "heater", "filter"}
 _OVERRIDE_ORDER = ("power", "preset", "heater", "filter")
 _OBSERVED_FIELDS = ("power", "heater", "filter", "preset_temp")
 _OVERRIDE_FOR_STATUS_FIELD = {"preset_temp": "preset"}
+_FILTER_AUTOSTOP_SECONDS = 2 * 60 * 60
+_FILTER_AUTOSTOP_TOLERANCE_SECONDS = 10 * 60
 
 
 class Scheduler:
@@ -516,9 +518,25 @@ class Scheduler:
                 key = _OVERRIDE_FOR_STATUS_FIELD.get(field, field)
                 if self._ignore_observed_until.get(key, 0.0) > _time.time():
                     continue
+                if self._looks_like_filter_autostop(field, status):
+                    continue
                 changed.append(key)
         if changed:
             self.note_manual(*changed)
+
+    def _looks_like_filter_autostop(self, field: str, status: dict) -> bool:
+        if field != "filter":
+            return False
+        if self._last_seen_status is None:
+            return False
+        if self._last_seen_status.get("filter") is not True or status.get("filter") is not False:
+            return False
+        last_auto = self._auto_changed_at.get("filter")
+        if last_auto is None:
+            return False
+
+        elapsed = _time.time() - last_auto
+        return abs(elapsed - _FILTER_AUTOSTOP_SECONDS) <= _FILTER_AUTOSTOP_TOLERANCE_SECONDS
 
     def _remember_status(self) -> None:
         status = (self.sup.state or {}).get("status")

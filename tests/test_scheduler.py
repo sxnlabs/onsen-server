@@ -434,6 +434,65 @@ async def test_auto_command_reversion_does_not_create_manual_override(tmp_path):
         await _teardown(spa, sup)
 
 
+async def test_filter_firmware_autostop_after_two_hours_is_not_manual_override(tmp_path):
+    cfg = {"enabled": True, "eco_temp": 25,
+           "filter_windows": [{"days": [0], "start": "08:00", "end": "12:00"}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 30, "preset_temp": 25,
+                   "filter": False, "heater": False})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999,
+                    min_automation_toggle_seconds=600)
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert spa.state["filter"] is True
+
+        # The real Baltik has been observed dropping filtration after roughly
+        # two hours even though the scheduler's window is still active.
+        sch._ignore_observed_until.clear()
+        sch._auto_changed_at["filter"] = time.time() - 2 * 60 * 60
+        spa.state["filter"] = False
+        await sup.refresh()
+        await sch.tick_once(now=MON.replace(hour=10, minute=1))
+
+        assert "filter" not in sch.manual_overrides_remaining()
+        assert sch._overridden("filter") is False
+        assert spa.state["filter"] is True
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_filter_physical_panel_change_before_autostop_gets_manual_override(tmp_path):
+    cfg = {"enabled": True, "eco_temp": 25,
+           "filter_windows": [{"days": [0], "start": "08:00", "end": "12:00"}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 30, "preset_temp": 25,
+                   "filter": False, "heater": False})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999,
+                    min_automation_toggle_seconds=600)
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert spa.state["filter"] is True
+
+        sch._ignore_observed_until.clear()
+        sch._auto_changed_at["filter"] = time.time() - 60 * 60
+        spa.state["filter"] = False
+        await sup.refresh()
+        await sch.tick_once(now=MON.replace(hour=9))
+
+        assert spa.state["filter"] is False
+        assert sch._overridden("filter") is True
+    finally:
+        await _teardown(spa, sup)
+
+
 async def test_ready_by_preheats(tmp_path):
     cfg = {"enabled": True, "eco_temp": 30,
            "ready_by": [{"days": [0, 1, 2, 3, 4, 5, 6], "time": "10:00", "temp": 38}]}
