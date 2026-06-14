@@ -47,21 +47,33 @@ cp wireguard/wg0.conf.example wireguard/wg0.conf
 #     - Endpoint   = <wan-or-ddns>:51820
 #     - PersistentKeepalive = 25
 
-docker compose up -d --build
+# (don't start the app yet — verify the tunnel first, in step 4)
 ```
 
-## 4. Verify
+## 4. Verify the tunnel, then start
+
+The spa accepts only **one** TCP client, so confirm reachability *before* the app
+owns the connection. `docker compose run` brings up the WireGuard tunnel and runs
+a one-off container **without** the supervisor — `probe.py` is read-only but opens
+its own socket, so it must never run alongside the live `onsen` server:
 
 ```bash
+docker compose run --rm onsen python3 probe.py "$INTEX_SPA_HOST"   # tunnel + spa OK
+```
+
+Then start the app and check it:
+
+```bash
+docker compose up -d --build
 docker compose ps
-# read-only protocol check THROUGH the tunnel (does not disturb the live connection):
-docker compose exec onsen python3 probe.py "$INTEX_SPA_HOST"
 curl -fsS http://127.0.0.1:8731/healthz
 ```
 
-Then open the UI: live water temperature should update (SSE), and a toggle (e.g.
+Open the UI: live water temperature should update (SSE), and a toggle (e.g.
 bubbles) should round-trip and append a row to `state/commands.jsonl`. The camera
-card shows the live frame and timelapse — there is no cover detection.
+card shows the live frame and timelapse — there is no cover detection. To run
+`probe.py` again later, stop the app first (`docker compose stop onsen`) — never
+probe while `onsen` is running.
 
 ## 5. Cutover from the Mac (once)
 
