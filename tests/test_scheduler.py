@@ -453,7 +453,8 @@ async def test_filter_firmware_autostop_after_two_hours_is_not_manual_override(t
         # The real Baltik has been observed dropping filtration after roughly
         # two hours even though the scheduler's window is still active.
         sch._ignore_observed_until.clear()
-        sch._auto_changed_at["filter"] = time.time() - 2 * 60 * 60
+        sch._auto_changed_at.pop("filter", None)          # relay cooldown long expired
+        sch._auto_filter_started_at = time.time() - 2 * 60 * 60
         spa.state["filter"] = False
         await sup.refresh()
         await sch.tick_once(now=MON.replace(hour=10, minute=1))
@@ -482,13 +483,80 @@ async def test_filter_physical_panel_change_before_autostop_gets_manual_override
         assert spa.state["filter"] is True
 
         sch._ignore_observed_until.clear()
-        sch._auto_changed_at["filter"] = time.time() - 60 * 60
+        sch._auto_changed_at.pop("filter", None)
+        sch._auto_filter_started_at = time.time() - 60 * 60
         spa.state["filter"] = False
         await sup.refresh()
         await sch.tick_once(now=MON.replace(hour=9))
 
         assert spa.state["filter"] is False
         assert sch._overridden("filter") is True
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_filter_autostop_detection_survives_scheduler_restart(tmp_path):
+    """A restart >10min after the auto filter-start must still recognize the ~2h
+    firmware autostop — the cooldown entry is gone by then, but the autostop
+    timestamp is persisted on its own longer horizon."""
+    cfg = {"enabled": True, "eco_temp": 25,
+           "filter_windows": [{"days": [0], "start": "08:00", "end": "12:00"}]}
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 30, "preset_temp": 25,
+                   "filter": False, "heater": False})
+    host, port = await spa.start()
+    sup = Supervisor(host, port=port, poll_interval=9999)
+    await sup.refresh()
+    cfgpath = tmp_path / "schedule.json"
+    cfgpath.write_text(json.dumps(cfg))
+    cooldown_path = tmp_path / "automation_cooldowns.json"
+    sch = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999,
+                    min_automation_toggle_seconds=600, cooldown_path=cooldown_path)
+    try:
+        await sch.tick_once(now=MON.replace(hour=8))
+        assert spa.state["filter"] is True
+
+        # Simulate the auto-start having happened ~2h ago, then persist + restart.
+        sch._auto_filter_started_at = time.time() - 2 * 60 * 60
+        sch._auto_changed_at.pop("filter", None)
+        sch._save_auto_cooldowns()
+
+        restarted = Scheduler(sup, config_path=str(cfgpath), tick_seconds=9999,
+                              min_automation_toggle_seconds=600,
+                              cooldown_path=cooldown_path)
+        # cooldown entry is gone (older than 10 min) ...
+        assert "filter" not in restarted.automation_cooldowns_remaining()
+        # ... but the autostop timestamp survived the restart.
+        assert restarted._auto_filter_started_at is not None
+
+        # The firmware autostop now fires: must NOT become a manual override.
+        restarted._ignore_observed_until.clear()
+        spa.state["filter"] = False
+        await sup.refresh()
+        await restarted.tick_once(now=MON.replace(hour=10, minute=1))
+
+        assert "filter" not in restarted.manual_overrides_remaining()
+        assert spa.state["filter"] is True
+    finally:
+        await _teardown(spa, sup)
+
+
+async def test_auto_cooldowns_load_legacy_flat_format(tmp_path):
+    """Old state files stored a flat {field: ts} map; it must still load, and the
+    filter entry must seed autostop detection."""
+    spa, sup, sch = await _setup(tmp_path, cfg={"enabled": True})
+    cooldown_path = tmp_path / "automation_cooldowns.json"
+    try:
+        now = time.time()
+        cooldown_path.write_text(json.dumps({"heater": now, "filter": now - 2 * 60 * 60}))
+        restarted = Scheduler(sup, config_path=str(tmp_path / "schedule.json"),
+                              tick_seconds=9999, min_automation_toggle_seconds=600,
+                              cooldown_path=cooldown_path)
+        # fresh heater cooldown restored ...
+        assert "heater" in restarted.automation_cooldowns_remaining()
+        # ... filter cooldown expired (2h > 10min) ...
+        assert "filter" not in restarted.automation_cooldowns_remaining()
+        # ... but its start time still seeded the autostop detector.
+        assert restarted._auto_filter_started_at is not None
     finally:
         await _teardown(spa, sup)
 
