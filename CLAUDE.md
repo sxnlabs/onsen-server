@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-This repo is the Onsen **server**. The project is split across three locations: the server (here, `~/Workspace/SXN-Labs/onsen`), the native iOS/watchOS app (`~/Workspace/Apps/Onsen`), and the specs (`~/Specs/Onsen`). The server is the single-process FastAPI runtime that replaces the Intex iOS app for an Intex PureSpa (Baltik) on the LAN. It talks raw TCP to the spa's wifi module on port 8990. No cloud, no vendor SDK, protocol reverse-engineered from `mathieu-mp/aio-intex-spa` and validated against the real device (<spa-ip>). `~/Specs/Onsen/server.md` is the canonical server product spec — read it before this file for context.
+This repo is the Onsen **server**. The project is split across three locations: the server (here, `~/Workspace/Web/onsen`), the native iOS/watchOS app (`~/Workspace/Apps/Onsen`), and the specs (`~/Specs/Onsen`). The server is the single-process FastAPI runtime that replaces the Intex iOS app for an Intex PureSpa (Baltik) on the LAN. It talks raw TCP to the spa's wifi module on port 8990. No cloud, no vendor SDK, protocol reverse-engineered from `mathieu-mp/aio-intex-spa` and validated against the real device (<spa-ip>). `~/Specs/Onsen/server.md` is the canonical server product spec — read it before this file for context.
 
 ## Commands
 
@@ -12,7 +12,7 @@ This repo is the Onsen **server**. The project is split across three locations: 
 # run from the repo root
 
 # first local provision
-uv sync --extra dev --extra camera
+uv sync --extra dev
 
 # dev (auto-reload, single process)
 INTEX_SPA_HOST=<spa-ip> uv run uvicorn web.main:make_app --factory --reload
@@ -32,6 +32,23 @@ INTEX_SPA_HOST=<spa-ip> ./install.sh
 ```
 
 Server test config lives in `pyproject.toml`: `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed), `pythonpath = [".", "tests"]`. Run these commands from the repo root.
+
+## Deployment
+
+Two supported runtimes, same one-process contract:
+
+- **Local (Mac) — LaunchAgent.** `INTEX_SPA_HOST=<spa-ip> ./install.sh` (see Commands).
+- **Remote (Linux) — Docker + WireGuard → UniFi.** Run off a server you own so the Mac can be off; a WireGuard tunnel terminated by the UniFi gateway lets the container reach the spa's LAN IP. Full runbook in [`DEPLOY.md`](DEPLOY.md).
+
+```bash
+# on the remote host, from the repo root
+cp .env.example .env                                 # INTEX_SPA_HOST, HERMES_PASSWORD, WEATHER_*
+cp wireguard/wg0.conf.example wireguard/wg0.conf     # paste the UniFi peer config
+docker compose up -d --build
+docker compose exec onsen python3 probe.py "$INTEX_SPA_HOST"   # read-only tunnel + spa check
+```
+
+The spa accepts only ONE TCP client, so the LaunchAgent and the container must never run at the same time — stop one before starting the other. The image CMD runs a single uvicorn in `--factory` mode; never add `--workers`, never scale the `onsen` service. `Dockerfile` is multi-stage (Python 3.12 + `ffmpeg` for the live camera; no Python image deps — cover detection was removed).
 
 ## Architecture — the invariants that drive every design choice
 

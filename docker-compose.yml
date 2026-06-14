@@ -1,0 +1,41 @@
+# Onsen — remote Docker deployment with a WireGuard tunnel back to the home LAN.
+#
+# The `onsen` app shares the `wireguard` container's network namespace, so its
+# raw TCP to the spa (:8990) and the RTSP camera transparently ride the tunnel.
+# The UI port is published by the wireguard service — a container sharing another
+# container's netns cannot declare its own `ports:`.
+#
+#   cp .env.example .env                                # fill in INTEX_SPA_HOST etc.
+#   cp wireguard/wg0.conf.example wireguard/wg0.conf    # paste the UniFi peer config
+#   docker compose up -d --build
+#
+# Single process is the whole point: never scale `onsen` to >1 replica — the spa
+# firmware accepts only one TCP client.
+services:
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    container_name: onsen-wireguard
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ./wireguard:/config/wg_confs:ro
+      # Uncomment if the host kernel has no built-in wireguard module:
+      # - /lib/modules:/lib/modules:ro
+    ports:
+      # UI on the host loopback only — front it with your reverse proxy (TLS) or
+      # reach it over the VPN. Never expose 8731 raw to the WAN.
+      - "127.0.0.1:8731:8731"
+    restart: unless-stopped
+
+  onsen:
+    build: .
+    container_name: onsen
+    network_mode: "service:wireguard"   # ride the tunnel; no own ports here
+    depends_on:
+      - wireguard
+    env_file: .env
+    volumes:
+      - ./state:/app/state              # persist history, schedule, secrets, frames
+    restart: unless-stopped

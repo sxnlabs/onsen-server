@@ -1,0 +1,31 @@
+# Build context hygiene — keep the image small and never ship local state/secrets.
+.venv
+server/.venv
+state
+server/state
+*.log
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.git
+.gitignore
+.DS_Store
+*.ips
+
+# macOS LaunchAgent assets — not used inside the container.
+com.sxnlabs.spa.plist.tmpl
+install.sh
+
+# Deployment config / secrets — not part of the image (compose mounts them).
+.env
+wireguard
+docker-compose.yml
+Dockerfile
+
+# Docs / specs — not needed at runtime.
+*.md
+LICENSE
+
+# Tests aren't run in the runtime image (they run in CI / locally via uv).
+tests
