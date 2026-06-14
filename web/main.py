@@ -22,7 +22,6 @@ import asyncio
 import datetime as _dt
 import json as _json
 import os
-import time as _time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -69,16 +68,6 @@ def _fmt_ts(epoch: float | None) -> str:
 templates.env.filters["ts"] = _fmt_ts
 templates.env.globals["ui_toggles"] = UI_TOGGLES
 templates.env.globals["LANGS"] = i18n.LANGS
-
-
-def _load_cover_state(path: str | Path) -> dict | None:
-    p = Path(path)
-    if not p.exists():
-        return None
-    try:
-        return _json.loads(p.read_text())
-    except (_json.JSONDecodeError, OSError):
-        return None
 
 
 def _intervals_from_points(
@@ -295,22 +284,6 @@ def create_app(
     # route checks `camera is None` and degrades cleanly. No env vars.
     camera_config = cam_mod.load_config(camera_config_path)
     if camera_config is not None:
-        def _classify_cover(frame_path):
-            # only run when an ROI is calibrated; classify() itself bails out
-            # cleanly without pillow installed (returns "unknown")
-            roi = camera_config.get("roi")
-            if not roi:
-                return
-            from intex_spa import cover_detect
-
-            result = cover_detect.classify(
-                frame_path, roi,
-                baseline_on=camera_config.get("cover_baseline_on"),
-                baseline_off=camera_config.get("cover_baseline_off"),
-                forced_state=camera_config.get("cover_forced_state"),
-            )
-            cover_detect.save_state(camera_config["cover_state_path"], result)
-
         camera = cam_mod.CameraSnapshot(
             camera_config["rtsps_url"],
             frame_path=camera_config["frame_path"],
@@ -323,7 +296,6 @@ def create_app(
             snapshot_max_width=camera_config["snapshot_max_width"],
             ffmpeg_bin=camera_config["ffmpeg"],
             ffmpeg_extra_args=camera_config["ffmpeg_extra_args"],
-            post_grab=_classify_cover,
         )
     else:
         camera = None
@@ -659,15 +631,6 @@ def create_app(
             return {"enabled": False}
         snap = camera.snapshot()
         snap["enabled"] = True
-        snap["roi"] = (camera_config or {}).get("roi")
-        # last persisted cover state (None if never run / no pillow / no ROI)
-        if camera_config:
-            snap["cover"] = _load_cover_state(camera_config["cover_state_path"])
-            snap["baselines"] = {
-                "on": camera_config.get("cover_baseline_on"),
-                "off": camera_config.get("cover_baseline_off"),
-            }
-            snap["forced_state"] = camera_config.get("cover_forced_state")
         return snap
 
     @app.get("/camera.jpg")
@@ -679,91 +642,6 @@ def create_app(
             media_type="image/jpeg",
             headers={"Cache-Control": "no-store"},
         )
-
-    @app.post("/api/camera/roi")
-    async def camera_set_roi(request: Request):
-        if camera is None or not camera_config:
-            raise HTTPException(status_code=503, detail="camera disabled")
-        try:
-            body = await request.json()
-        except Exception:
-            raise HTTPException(status_code=400, detail="invalid JSON body")
-        if body is None:
-            new_roi = None
-        else:
-            try:
-                new_roi = {
-                    "x": int(body["x"]), "y": int(body["y"]),
-                    "w": int(body["w"]), "h": int(body["h"]),
-                }
-            except (KeyError, TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="roi needs {x, y, w, h}")
-            if new_roi["w"] <= 0 or new_roi["h"] <= 0:
-                raise HTTPException(status_code=400, detail="roi w/h must be > 0")
-        camera_config["roi"] = new_roi
-        cam_mod.save_config(app.state.camera_config_path, camera_config)
-        return {"ok": True, "roi": new_roi}
-
-    @app.post("/api/camera/cover/calibrate")
-    async def camera_cover_calibrate(state: str):
-        """Capture the current ROI's (luma, std) as a baseline for `state`.
-
-        After the user has clicked once with cover ON and once with cover OFF,
-        the classifier swaps to nearest-baseline — self-tuned to this scene.
-        """
-        if camera is None or not camera_config:
-            raise HTTPException(status_code=503, detail="camera disabled")
-        if state not in ("on", "off"):
-            raise HTTPException(status_code=400, detail="state must be 'on' or 'off'")
-        roi = camera_config.get("roi")
-        if not roi:
-            raise HTTPException(status_code=400, detail="calibrate the ROI first")
-        from intex_spa import cover_detect
-
-        try:
-            luma, std = await run_blocking(
-                cover_detect.sample, camera_config["frame_path"], roi,
-            )
-        except FileNotFoundError:
-            raise HTTPException(status_code=409, detail="no frame yet — wait one poll")
-        except RuntimeError as e:    # pillow/numpy missing
-            raise HTTPException(status_code=503, detail=str(e))
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        baseline = {"luma": luma, "std": std, "at": _time.time()}
-        camera_config[f"cover_baseline_{state}"] = baseline
-        cam_mod.save_config(app.state.camera_config_path, camera_config)
-        # re-classify immediately so the UI badge updates without waiting for next poll
-        await run_blocking(_classify_cover, camera_config["frame_path"])
-        return {
-            "ok": True,
-            "state": state,
-            "baseline": baseline,
-            "have_both": bool(camera_config.get("cover_baseline_on")
-                              and camera_config.get("cover_baseline_off")),
-        }
-
-    @app.post("/api/camera/cover/reset")
-    async def camera_cover_reset():
-        if camera is None or not camera_config:
-            raise HTTPException(status_code=503, detail="camera disabled")
-        camera_config["cover_baseline_on"] = None
-        camera_config["cover_baseline_off"] = None
-        cam_mod.save_config(app.state.camera_config_path, camera_config)
-        return {"ok": True}
-
-    @app.post("/api/camera/cover/state")
-    async def camera_cover_state(state: str = ""):
-        """Force the cover state. `state` ∈ {on, off, auto}; auto clears the override."""
-        if camera is None or not camera_config:
-            raise HTTPException(status_code=503, detail="camera disabled")
-        if state not in ("on", "off", "auto"):
-            raise HTTPException(status_code=400, detail="state must be on/off/auto")
-        forced = state if state in ("on", "off") else None
-        camera_config["cover_forced_state"] = forced
-        cam_mod.save_config(app.state.camera_config_path, camera_config)
-        await run_blocking(_classify_cover, camera_config["frame_path"])
-        return {"ok": True, "forced_state": forced}
 
     @app.get("/timelapse")
     async def timelapse(date: str):

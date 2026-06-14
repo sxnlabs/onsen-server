@@ -68,54 +68,11 @@
           <div class="cam-frame" id="cam-frame">
             <img id="cam-img" alt="{{ t('cam.alt') }}" hidden>
             <div class="cam-empty" id="cam-empty">{{ t('cam.waiting') }}</div>
-            <canvas class="cam-roi-canvas" id="cam-roi-canvas" hidden></canvas>
           </div>
           <div class="cam-row">
-            <span class="cam-badge" id="cam-cover">{{ t('cam.cover_label') }}</span>
             <div class="cam-actions">
               <a class="cam-btn" id="cam-recap-link" href="#">{{ t('cam.recap') }}</a>
               <a class="cam-btn" id="cam-tl-link" href="#">{{ t('cam.timelapse') }}</a>
-              <button type="button" class="cam-btn cam-btn-icon" id="cam-settings-btn" aria-label="{{ t('cam.settings_aria') }}">⚙</button>
-            </div>
-          </div>
-
-          <div class="cam-settings" id="cam-settings" hidden>
-            <div class="cam-settings-section">
-              <div class="cam-settings-label">{{ t('cam.state_section') }}</div>
-              <div class="cam-segmented" role="radiogroup" aria-label="{{ t('cam.state_section') }}">
-                <button type="button" class="cam-seg" data-force="auto" role="radio">{{ t('cam.state_auto') }}</button>
-                <button type="button" class="cam-seg" data-force="on"   role="radio">{{ t('cam.state_on') }}</button>
-                <button type="button" class="cam-seg" data-force="off"  role="radio">{{ t('cam.state_off') }}</button>
-              </div>
-              <p class="cam-meta">{{ t('cam.state_help') }}</p>
-            </div>
-
-            <div class="cam-settings-section">
-              <div class="cam-settings-label">{{ t('cam.roi_section') }}</div>
-              <div class="cam-actions">
-                <button type="button" class="cam-btn" id="cam-roi-btn">{{ t('cam.roi_redraw') }}</button>
-                <button type="button" class="cam-btn" id="cam-roi-clear-saved">{{ t('cam.roi_clear') }}</button>
-              </div>
-            </div>
-
-            <div class="cam-settings-section">
-              <div class="cam-settings-label">{{ t('cam.learn_section') }}</div>
-              <p class="cam-meta" id="cam-cover-help">{{ t('cam.learn_help') }}</p>
-              <div class="cam-actions">
-                <button type="button" class="cam-btn" id="cam-cover-on">{{ t('cam.learn_on') }}</button>
-                <button type="button" class="cam-btn" id="cam-cover-off">{{ t('cam.learn_off') }}</button>
-                <button type="button" class="cam-btn" id="cam-cover-reset">{{ t('cam.learn_reset') }}</button>
-              </div>
-            </div>
-
-            <p class="cam-note">{{ t('cam.note_experimental') }}</p>
-          </div>
-
-          <div class="cam-row cam-roi-actions" id="cam-roi-actions" hidden>
-            <span class="cam-meta">{{ t('cam.roi_help') }}</span>
-            <div class="cam-actions">
-              <button type="button" class="cam-btn" id="cam-roi-cancel">{{ t('cam.roi_cancel') }}</button>
-              <button type="button" class="cam-btn cam-btn-primary" id="cam-roi-save">{{ t('cam.roi_save') }}</button>
             </div>
           </div>
         </section>

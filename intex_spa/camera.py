@@ -5,8 +5,7 @@ lifespan tasks. The master switch is `load_config()` — when `state/camera.json
 is missing or `rtsps_url` is empty, every consumer in this module sees `None`
 and degrades cleanly: no background tasks start, endpoints return
 `{"enabled": false}`, the UI hides the camera card. The core path here is stdlib
-+ a system `ffmpeg`; optional image-analysis deps live in companion modules with
-guarded imports.
++ a system `ffmpeg`.
 
 ffmpeg runs as a subprocess from the shared I/O worker pool so the event loop is
 never blocked. Each grab writes `state/cam.jpg` atomically
@@ -36,13 +35,8 @@ _LOG = logging.getLogger("intex_spa.camera")
 DEFAULT_CONFIG = {
     "rtsps_url": "",
     "poll_seconds": 10.0,
-    "roi": None,                            # cover-detection ROI: {x,y,w,h} or None
-    "cover_baseline_on": None,              # {luma, std} captured by the calibrate endpoint
-    "cover_baseline_off": None,             # idem; both present ⇒ nearest-baseline classifier
-    "cover_forced_state": None,             # "on"|"off" overrides the classifier; null = auto
     "frame_path": "state/cam.jpg",
     "history_dir": "state/cam_history",
-    "cover_state_path": "state/cover_state.json",
     "timelapse_every_seconds": 60.0,        # archive ≈ 1 frame/min
     "timelapse_retention_days": 7,
     "timelapse_fps": 24,
@@ -110,7 +104,6 @@ class CameraSnapshot:
         ffmpeg_bin: str = "ffmpeg",
         ffmpeg_extra_args: list[str] | None = None,
         grab_timeout: float = 30.0,
-        post_grab: "callable | None" = None,
     ) -> None:
         self.url = rtsps_url
         self.frame_path = Path(frame_path)
@@ -124,9 +117,6 @@ class CameraSnapshot:
         self.ffmpeg_bin = ffmpeg_bin
         self.ffmpeg_extra_args = list(ffmpeg_extra_args or [])
         self.grab_timeout = grab_timeout
-        # post_grab(frame_path) runs in a worker thread after each successful
-        # grab — keeps cover-detection decoupled from this module.
-        self.post_grab = post_grab
         self.last_frame_at: float | None = None
         self.last_error: str | None = None
         self._last_archive: float = 0.0
@@ -175,9 +165,6 @@ class CameraSnapshot:
             with contextlib.suppress(Exception):
                 await run_blocking(self._prune_history)
             self._last_prune = now
-        if self.post_grab is not None:
-            with contextlib.suppress(Exception):
-                await run_blocking(self.post_grab, self.frame_path)
 
     # -- ffmpeg -----------------------------------------------------------
     def build_cmd(self, dest: Path) -> list[str]:

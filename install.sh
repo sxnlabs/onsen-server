@@ -22,11 +22,11 @@ if [ -z "$UV" ]; then
   exit 1
 fi
 
-echo "→ provisioning venv (uv sync, incl. dev for the smoke test + camera extras)"
+echo "→ provisioning venv (uv sync, incl. dev for the smoke test)"
 # .python-version pins CPython 3.12. Don't bump to 3.14 without testing the service
 # under launchd for ≥30 min — uvicorn[standard] pulls uvloop/httptools/pydantic-core
 # (all native), and 3.14 produced silent ~30s deaths with no traceback on this machine.
-uv sync --extra dev --extra camera
+uv sync --extra dev
 
 echo "→ smoke test (offline)"
 uv run python -m pytest -q
