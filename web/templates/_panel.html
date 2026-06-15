@@ -42,10 +42,23 @@
 
   <div class="setpoint">
     <button class="step" hx-post="/preset/{{ st.preset_temp - 1 }}" hx-target="#panel" hx-swap="innerHTML"
+            hx-indicator="#cmd-spinner" hx-disabled-elt="this"
             {% if st.preset_temp <= 20 %}disabled{% endif %} aria-label="{{ t('panel.lower_setpoint') }}">−</button>
     <span class="val">{{ st.preset_temp }}<small>°{{ st.unit }}</small><em>{{ t('panel.consigne') }}</em></span>
     <button class="step" hx-post="/preset/{{ st.preset_temp + 1 }}" hx-target="#panel" hx-swap="innerHTML"
+            hx-indicator="#cmd-spinner" hx-disabled-elt="this"
             {% if st.preset_temp >= 40 %}disabled{% endif %} aria-label="{{ t('panel.raise_setpoint') }}">+</button>
+  </div>
+
+  {% set quick_temps = [25, 28, 31, 34, 37, 40] %}
+  <div class="temp-grid" role="group" aria-label="{{ t('panel.quickset') }}">
+    {% for temp in quick_temps %}
+    <button class="temp-chip{% if temp == st.preset_temp %} is-current{% endif %}"
+            hx-post="/preset/{{ temp }}" hx-target="#panel" hx-swap="innerHTML"
+            hx-indicator="#cmd-spinner" hx-disabled-elt="this"
+            {% if temp == st.preset_temp %}aria-current="true"{% endif %}
+            aria-label="{{ t('panel.set_to', temp=temp) }}">{{ temp }}</button>
+    {% endfor %}
   </div>
 
   {% if eta %}
@@ -55,7 +68,8 @@
   <div class="toggles">
     {% for field, label_key, emoji in ui_toggles %}
     <button class="toggle {% if st[field] %}on{% endif %}"
-            hx-post="/toggle/{{ field }}" hx-target="#panel" hx-swap="innerHTML">
+            hx-post="/toggle/{{ field }}" hx-target="#panel" hx-swap="innerHTML"
+            hx-indicator="#cmd-spinner" hx-disabled-elt="this">
       <span class="lbl"><span class="ico">{{ emoji }}</span> {{ t(label_key) }}</span>
       <span class="state">{{ t('toggle.on') if st[field] else t('toggle.off') }}</span>
     </button>

@@ -268,6 +268,55 @@ header h1 {
 .step:active { transform: scale(0.92); }
 .step:disabled { opacity: 0.35; cursor: not-allowed; }
 
+/* quick-set temperature grid — jump straight to a setpoint in one round-trip */
+.temp-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);  /* 6 steps → balanced 3×2, no orphans */
+  gap: 8px;
+  margin: 10px 2px 0;
+}
+.temp-chip {
+  padding: 13px 0;
+  border-radius: 12px;
+  border: 1px solid var(--card-hi);
+  background: var(--card-hi);
+  color: var(--fg);
+  font-size: 1rem; font-weight: 700; line-height: 1;
+  cursor: pointer;
+  transition: transform 0.05s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.temp-chip:active { transform: scale(0.94); }
+.temp-chip:disabled { opacity: 0.5; cursor: progress; }
+.temp-chip.is-current {
+  background: linear-gradient(135deg, #22d3ee, #0891b2);
+  border-color: transparent;
+  color: #ffffff;
+}
+
+/* command-in-flight overlay: shown until the spa ACKs the write, and blocks
+   further taps so rapid clicks don't queue serialized round-trips */
+.panel-shell { position: relative; }
+.cmd-spinner {
+  position: absolute; inset: 0;
+  display: none;
+  align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--card) 60%, transparent);
+  border-radius: var(--radius);
+  z-index: 5;
+}
+.cmd-spinner.htmx-request { display: flex; }
+.cmd-spinner .spin {
+  width: 36px; height: 36px;
+  border: 3px solid var(--card-hi);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: cmd-spin 0.7s linear infinite;
+}
+@keyframes cmd-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .cmd-spinner .spin { animation-duration: 1.6s; }
+}
+
 .eta {
   text-align: center;
   margin: 0 0 4px;

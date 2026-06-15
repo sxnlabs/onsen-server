@@ -30,9 +30,15 @@
 
     <div class="layout">
       <div class="col-main">
-        <div hx-ext="sse" sse-connect="/events">
-          <div id="panel" sse-swap="update" hx-target="#panel" hx-swap="innerHTML">
-            {% include "_panel.html" %}
+        <div class="panel-shell">
+          <div hx-ext="sse" sse-connect="/events">
+            <div id="panel" sse-swap="update" hx-target="#panel" hx-swap="innerHTML">
+              {% include "_panel.html" %}
+            </div>
+          </div>
+          <div id="cmd-spinner" class="cmd-spinner" role="status" aria-live="polite"
+               aria-label="{{ t('panel.sending') }}">
+            <span class="spin" aria-hidden="true"></span>
           </div>
         </div>
 
