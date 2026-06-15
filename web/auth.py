@@ -97,3 +97,33 @@ class LoginThrottle:
     def reset(self, key: str) -> None:
         self._fails.pop(key, None)
         self._until.pop(key, None)
+
+
+class GlobalRateLimiter:
+    """Process-wide token-bucket cap on login attempts across ALL clients.
+
+    Unlike the per-IP LoginThrottle (whose key — the forwarded IP — is
+    client-settable) and a per-request delay (independent request coroutines
+    just sleep in parallel, so concurrent guesses aren't bounded), this caps the
+    TOTAL attempt rate regardless of source IP or concurrency. The login handler
+    consumes a token BEFORE verifying the password, so online guessing is
+    genuinely rate-limited even from rotated sources.
+    """
+
+    def __init__(self, rate_per_sec: float = 1.0, burst: int = 15) -> None:
+        self.rate = float(rate_per_sec)
+        self.capacity = float(burst)
+        self._tokens = float(burst)
+        self._last: float | None = None
+
+    def take(self, now: float | None = None) -> int:
+        """Consume one token. Returns 0 if allowed, else seconds to wait."""
+        now = time.time() if now is None else now
+        if self._last is None:
+            self._last = now
+        self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
+        self._last = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return 0
+        return max(1, int((1.0 - self._tokens) / self.rate) + 1)

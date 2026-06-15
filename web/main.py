@@ -266,7 +266,7 @@ def create_app(
     manual_override_path: str | None = "state/manual_overrides.json",
     pause_path: str | None = "state/pause.json",
     automation_cooldown_path: str | None = "state/automation_cooldowns.json",
-    login_fail_delay: float = 1.0,
+    login_limiter: auth.GlobalRateLimiter | None = None,
     io_threads: int | None = 8,
 ) -> FastAPI:
     weather = (
@@ -294,6 +294,7 @@ def create_app(
     )
     secret = auth.load_or_create_secret(secret_path) if password else b""
     login_throttle = auth.LoginThrottle()
+    login_limiter = login_limiter or auth.GlobalRateLimiter()
 
     # -- camera subsystem (master switch via state/camera.json) ----------
     # weather pattern: instantiate once, hold None when unconfigured; every
@@ -502,12 +503,16 @@ def create_app(
     @app.post("/login")
     async def login_submit(request: Request):
         ip = _client_ip(request)
-        retry = login_throttle.retry_after(ip)
-        if retry > 0:
+        # Gate BEFORE verifying the password so guessing is actually bounded:
+        # a process-wide token bucket caps total throughput regardless of source
+        # IP or concurrency, plus the per-IP lockout (secondary — X-Forwarded-For
+        # is client-settable).
+        wait = login_limiter.take() or login_throttle.retry_after(ip)
+        if wait > 0:
             resp = templates.TemplateResponse(
                 request, "login.html", _ctx(request, error=True), status_code=429
             )
-            resp.headers["Retry-After"] = str(retry)
+            resp.headers["Retry-After"] = str(wait)
             return resp
         body = (await request.body()).decode("utf-8", "replace")
         supplied = parse_qs(body).get("password", [""])[0]
@@ -523,11 +528,7 @@ def create_app(
                 secure=_forwarded_https(request),
             )
             return resp
-        # Wrong password: record the failure and impose a fixed delay so online
-        # guessing stays bounded even if the source IP rotates.
         login_throttle.record_failure(ip)
-        if login_fail_delay > 0:
-            await asyncio.sleep(login_fail_delay)
         return templates.TemplateResponse(request, "login.html", _ctx(request, error=True), status_code=401)
 
     @app.get("/", response_class=HTMLResponse)

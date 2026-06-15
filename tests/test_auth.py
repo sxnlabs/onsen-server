@@ -12,7 +12,7 @@ PW = "hunter2"
 
 
 @asynccontextmanager
-async def auth_client(spa: FakeSpa, tmp_path, password: str | None = PW):
+async def auth_client(spa: FakeSpa, tmp_path, password: str | None = PW, login_limiter=None):
     host, port = await spa.start()
     app = create_app(
         host,
@@ -24,7 +24,7 @@ async def auth_client(spa: FakeSpa, tmp_path, password: str | None = PW):
         manual_override_path=None,
         pause_path=None,
         automation_cooldown_path=None,
-        login_fail_delay=0,
+        login_limiter=login_limiter,
         password=password,
         secret_path=str(tmp_path / ".secret"),
     )
@@ -138,6 +138,36 @@ async def test_security_headers_present(tmp_path):
         assert r.headers.get("x-frame-options") == "DENY"
         assert "frame-ancestors 'none'" in r.headers.get("content-security-policy", "")
         assert r.headers.get("referrer-policy") == "no-referrer"
+
+
+def test_global_rate_limiter_token_bucket():
+    rl = auth.GlobalRateLimiter(rate_per_sec=1.0, burst=3)
+    assert rl.take(now=0) == 0
+    assert rl.take(now=0) == 0
+    assert rl.take(now=0) == 0       # burst exhausted
+    assert rl.take(now=0) > 0        # blocked → returns seconds to wait
+    assert rl.take(now=10) == 0      # refilled after enough time
+
+
+async def test_login_global_cap_not_bypassed_by_ip_rotation(tmp_path):
+    # The whole point of the global limiter: rotating X-Forwarded-For defeats the
+    # per-IP lockout, but NOT the process-wide token bucket.
+    spa = FakeSpa()
+    limiter = auth.GlobalRateLimiter(rate_per_sec=0.001, burst=2)
+    async with auth_client(spa, tmp_path, login_limiter=limiter) as client:
+        for i in range(2):  # burst of 2, each from a fresh IP
+            r = await client.post(
+                "/login", data={"password": "nope"},
+                headers={"X-Forwarded-For": f"10.0.0.{i}"},
+            )
+            assert r.status_code == 401
+        # a third fresh IP is still blocked by the global cap
+        r = await client.post(
+            "/login", data={"password": "nope"},
+            headers={"X-Forwarded-For": "10.0.0.99"},
+        )
+        assert r.status_code == 429
+        assert r.headers.get("retry-after")
 
 
 async def test_session_cookie_secure_only_behind_https(tmp_path):
