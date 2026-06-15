@@ -15,10 +15,13 @@ port 8990. Native apps should communicate with the server HTTP API only.
 Run server commands from the repo root:
 
 ```bash
-uv sync --extra dev --extra camera
+uv sync --extra dev
 INTEX_SPA_HOST=<spa-ip> uv run uvicorn web.main:make_app --factory --reload
 uv run pytest -q
 ```
+
+The live camera feed needs a system `ffmpeg` on `PATH` (no Python extras). It is
+optional: without `state/camera.json` the camera card is simply hidden.
 
 The detailed server spec is in `~/Specs/Onsen/server.md`. First-machine setup is
 in `~/Specs/Onsen/setup.md`.

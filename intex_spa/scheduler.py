@@ -26,6 +26,13 @@ _OVERRIDE_KEYS = {"power", "preset", "heater", "filter"}
 _OVERRIDE_ORDER = ("power", "preset", "heater", "filter")
 _OBSERVED_FIELDS = ("power", "heater", "filter", "preset_temp")
 _OVERRIDE_FOR_STATUS_FIELD = {"preset_temp": "preset"}
+_FILTER_AUTOSTOP_SECONDS = 2 * 60 * 60
+_FILTER_AUTOSTOP_TOLERANCE_SECONDS = 10 * 60
+# The autostop-detection timestamp must outlive the short relay-cooldown window:
+# keep it loadable across a restart for the whole autostop horizon (plus tolerance)
+# so a restart between the auto filter-start and the ~2h firmware autostop still
+# recognizes the stop instead of mistaking it for a manual action.
+_FILTER_AUTOSTOP_PERSIST_SECONDS = _FILTER_AUTOSTOP_SECONDS + _FILTER_AUTOSTOP_TOLERANCE_SECONDS
 
 
 class Scheduler:
@@ -56,6 +63,10 @@ class Scheduler:
         self.cooldown_path = Path(cooldown_path) if cooldown_path else None
         self._overrides: dict[str, float] = {}
         self._auto_changed_at: dict[str, float] = {}
+        # Last time the scheduler auto-started the filter — kept separately from
+        # the cooldown map because the firmware autostop it guards against fires
+        # ~2h later, far beyond the 10-min cooldown horizon.
+        self._auto_filter_started_at: float | None = None
         self._ignore_observed_until: dict[str, float] = {}
         self._ready_by_latch: dict | None = None
         self._last_seen_status: dict | None = None
@@ -164,7 +175,13 @@ class Scheduler:
         return active
 
     def _note_auto_change(self, field: str) -> None:
-        self._auto_changed_at[field] = _time.time()
+        now = _time.time()
+        self._auto_changed_at[field] = now
+        # Record the auto filter-start on its own longer-lived horizon so the ~2h
+        # autostop is still recognized after a restart (the cooldown entry above
+        # is pruned/loaded on a 10-min horizon — too short for this).
+        if field == "filter":
+            self._auto_filter_started_at = now
         self._save_auto_cooldowns()
 
     def _load_auto_cooldowns(self) -> None:
@@ -178,7 +195,14 @@ class Scheduler:
         if not isinstance(raw, dict):
             return
         now = _time.time()
-        for field, last in raw.items():
+        # New format: {"cooldowns": {field: ts}, "filter_started_at": ts}.
+        # Legacy format: a flat {field: ts} map (its "filter" entry doubled as the
+        # autostop source) — still loaded so existing state survives the upgrade.
+        nested = "cooldowns" in raw
+        cooldowns = raw.get("cooldowns") if nested else raw
+        if not isinstance(cooldowns, dict):
+            cooldowns = {}
+        for field, last in cooldowns.items():
             if field not in {"power", "heater", "filter"}:
                 continue
             try:
@@ -187,14 +211,27 @@ class Scheduler:
                 continue
             if (now - last_f) < self.min_automation_toggle_seconds:
                 self._auto_changed_at[field] = last_f
+        filter_started = raw.get("filter_started_at")
+        if filter_started is None and not nested:
+            filter_started = raw.get("filter")  # upgrade from the flat format
+        if filter_started is not None:
+            try:
+                fs = float(filter_started)
+            except (TypeError, ValueError):
+                fs = None
+            if fs is not None and (now - fs) < _FILTER_AUTOSTOP_PERSIST_SECONDS:
+                self._auto_filter_started_at = fs
 
     def _save_auto_cooldowns(self) -> None:
         if self.cooldown_path is None:
             return
         try:
             self.cooldown_path.parent.mkdir(parents=True, exist_ok=True)
+            data: dict = {"cooldowns": self._auto_changed_at}
+            if self._auto_filter_started_at is not None:
+                data["filter_started_at"] = self._auto_filter_started_at
             tmp = self.cooldown_path.with_suffix(self.cooldown_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(self._auto_changed_at, sort_keys=True))
+            tmp.write_text(json.dumps(data, sort_keys=True))
             tmp.replace(self.cooldown_path)
         except OSError:
             _LOG.warning("failed to persist automation cooldown state", exc_info=True)
@@ -516,9 +553,25 @@ class Scheduler:
                 key = _OVERRIDE_FOR_STATUS_FIELD.get(field, field)
                 if self._ignore_observed_until.get(key, 0.0) > _time.time():
                     continue
+                if self._looks_like_filter_autostop(field, status):
+                    continue
                 changed.append(key)
         if changed:
             self.note_manual(*changed)
+
+    def _looks_like_filter_autostop(self, field: str, status: dict) -> bool:
+        if field != "filter":
+            return False
+        if self._last_seen_status is None:
+            return False
+        if self._last_seen_status.get("filter") is not True or status.get("filter") is not False:
+            return False
+        last_auto = self._auto_filter_started_at
+        if last_auto is None:
+            return False
+
+        elapsed = _time.time() - last_auto
+        return abs(elapsed - _FILTER_AUTOSTOP_SECONDS) <= _FILTER_AUTOSTOP_TOLERANCE_SECONDS
 
     def _remember_status(self) -> None:
         status = (self.sup.state or {}).get("status")

@@ -7,3 +7,7 @@ __pycache__/
 state/
 server/state/
 *.log
+
+# Docker deployment secrets — never commit the real values.
+.env
+wireguard/wg0.conf

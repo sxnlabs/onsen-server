@@ -1,0 +1,31 @@
+# WireGuard client config — connects this host to the UniFi WireGuard server.
+#
+# Copy to `wireguard/wg0.conf` and paste the values from your UniFi peer config
+# (UniFi OS → Settings → VPN → VPN Server → WireGuard → add a peer/client, then
+# download or copy its config). Keep the real wg0.conf OUT of git.
+
+[Interface]
+# This host's tunnel address, assigned by the UniFi WireGuard server (one IP).
+Address = 10.6.0.2/32
+PrivateKey = <THIS_HOST_PRIVATE_KEY>
+# Optional — resolve home hostnames via the gateway. Usually leave commented:
+# DNS = 192.168.1.1
+
+[Peer]
+# The UniFi gateway's WireGuard server public key.
+PublicKey = <UNIFI_SERVER_PUBLIC_KEY>
+# Optional — only if the UniFi server config provides one.
+# PresharedKey = <PRESHARED_KEY>
+
+# Public endpoint of your home gateway. If your WAN IP is dynamic, enable UniFi
+# Dynamic DNS and use that hostname here. 51820 is WireGuard's default port.
+Endpoint = your-home.ddns.example:51820
+
+# Split tunnel: route ONLY the home LAN through the tunnel, so weather (Open-Meteo)
+# and image pulls keep using the host's normal interface. Replace with your real
+# LAN subnet. If the IP camera lives on a different subnet/VLAN, add it too, e.g.:
+#   AllowedIPs = 192.168.1.0/24, 192.168.30.0/24
+AllowedIPs = 192.168.1.0/24
+
+# Keep the NAT mapping alive so the gateway can always reach back through it.
+PersistentKeepalive = 25
