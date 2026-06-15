@@ -623,10 +623,12 @@ def create_app(
     @app.get("/healthz")
     async def healthz():
         s = supervisor.state
+        # Public (unauthenticated) endpoint — expose only a coarse boolean, never
+        # the raw error string (it embeds the spa's internal tunnel IP/port).
         return {
             "online": s["online"],
             "updated_at": s["updated_at"],
-            "error": s["error"],
+            "error": s["error"] is not None,
             "paused": supervisor.paused,
         }
 

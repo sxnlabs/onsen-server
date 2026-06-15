@@ -140,6 +140,7 @@ async def test_healthz():
         body = r.json()
         assert body["online"] is True
         assert body["paused"] is False     # default, no one paused yet
+        assert isinstance(body["error"], bool)  # coarse only — never the raw error string
 
 
 async def test_pause_toggle_round_trip():

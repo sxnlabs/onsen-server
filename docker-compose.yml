@@ -33,6 +33,9 @@ services:
     build: .
     container_name: onsen
     network_mode: "service:wireguard"   # ride the tunnel; no own ports here
+    cap_drop: [ALL]                     # the app needs no Linux capabilities
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - wireguard
     env_file: .env
