@@ -152,6 +152,17 @@ async def test_index_wires_command_spinner():
         assert 'hx-indicator="#cmd-spinner"' in r.text
 
 
+async def test_static_assets_are_cache_busted():
+    # app.css carries a ?v=<hash> so a redeploy isn't masked by a stale
+    # browser/CDN copy (the app serves /static without Cache-Control).
+    import re
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        r = await client.get("/")
+        m = re.search(r'/static/app\.css\?v=([0-9a-f]{6,})', r.text)
+        assert m, "app.css link is not cache-busted"
+
+
 async def test_heater_toggle_rejected_without_valid_water_temperature():
     spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181})
     async with app_for(spa) as client:

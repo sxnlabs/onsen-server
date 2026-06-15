@@ -10,7 +10,7 @@
   <title>{{ t('app.title') }}</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🫧</text></svg>">
   <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🫧</text></svg>">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
   <script>window.I18N = {{ i18n_bundle_json()|safe }};</script>
   <script src="/static/vendor/htmx.min.js"></script>
   <script src="/static/vendor/htmx-ext-sse.js"></script>
@@ -358,7 +358,7 @@
       setInterval(syncPause, 5000);
     })();
   </script>
-  <script src="/static/schedule.js"></script>
-  {% if camera_enabled %}<script src="/static/camera.js"></script>{% endif %}
+  <script src="/static/schedule.js?v={{ asset_v }}"></script>
+  {% if camera_enabled %}<script src="/static/camera.js?v={{ asset_v }}"></script>{% endif %}
 </body>
 </html>

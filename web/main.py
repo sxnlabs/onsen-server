@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import hashlib
 import json as _json
 import os
 from contextlib import asynccontextmanager, suppress
@@ -47,6 +48,22 @@ from . import auth, i18n
 
 _BASE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(_BASE / "templates"))
+
+
+def _asset_version() -> str:
+    """Short content hash of the local (non-vendored) static assets, appended to
+    their URLs as ?v= so a redeploy isn't masked by a stale browser/CDN copy
+    (the app serves /static without a Cache-Control header)."""
+    h = hashlib.sha256()
+    for name in ("app.css", "schedule.js", "camera.js"):
+        try:
+            h.update((_BASE / "static" / name).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:10]
+
+
+_ASSET_V = _asset_version()
 
 # functions exposed in the UI for this model (Baltik: no jets, no sanitizer).
 # The middle element is a *translation key*; the template renders it through t().
@@ -414,6 +431,7 @@ def create_app(
             "lang": lang,
             "t": _t,
             "i18n_bundle_json": _bundle_json,
+            "asset_v": _ASSET_V,
             **extra,
         }
 
