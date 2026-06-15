@@ -134,9 +134,10 @@ async def test_panel_renders_quickset_grid():
         assert 'hx-post="/preset/34"' in r.text
         assert 'hx-post="/preset/40"' in r.text
         assert 'hx-post="/preset/36"' not in r.text  # off-step values omitted
-        # the active setpoint chip is flagged current
+        # the active setpoint chip is flagged current AND disabled — tapping it
+        # would be a no-op preset that still arms a 60-min manual override
         assert "is-current" in r.text
-        assert 'aria-current="true"' in r.text
+        assert 'aria-current="true" disabled' in r.text
         # command buttons drive the in-flight (until-ACK) spinner
         assert 'hx-indicator="#cmd-spinner"' in r.text
 

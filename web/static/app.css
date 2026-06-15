@@ -291,6 +291,8 @@ header h1 {
   background: linear-gradient(135deg, #22d3ee, #0891b2);
   border-color: transparent;
   color: #ffffff;
+  opacity: 1;        /* it's disabled (no-op tap), but it's the active step — keep it bright */
+  cursor: default;
 }
 
 /* command-in-flight overlay: shown until the spa ACKs the write, and blocks

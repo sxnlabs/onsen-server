@@ -56,7 +56,7 @@
     <button class="temp-chip{% if temp == st.preset_temp %} is-current{% endif %}"
             hx-post="/preset/{{ temp }}" hx-target="#panel" hx-swap="innerHTML"
             hx-indicator="#cmd-spinner" hx-disabled-elt="this"
-            {% if temp == st.preset_temp %}aria-current="true"{% endif %}
+            {% if temp == st.preset_temp %}aria-current="true" disabled{% endif %}
             aria-label="{{ t('panel.set_to', temp=temp) }}">{{ temp }}</button>
     {% endfor %}
   </div>
