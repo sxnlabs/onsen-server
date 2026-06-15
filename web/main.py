@@ -503,11 +503,12 @@ def create_app(
     @app.post("/login")
     async def login_submit(request: Request):
         ip = _client_ip(request)
-        # Gate BEFORE verifying the password so guessing is actually bounded:
-        # a process-wide token bucket caps total throughput regardless of source
-        # IP or concurrency, plus the per-IP lockout (secondary — X-Forwarded-For
-        # is client-settable).
-        wait = login_limiter.take() or login_throttle.retry_after(ip)
+        # Gate BEFORE verifying the password so guessing is actually bounded.
+        # Per-IP lockout FIRST: an already-locked client must NOT consume a
+        # global token (else one locked IP at ~1 req/s keeps the shared bucket
+        # empty and 429s everyone). Only a non-locked attempt then takes a global
+        # token, which bounds rotated/concurrent sources that evade the per-IP key.
+        wait = login_throttle.retry_after(ip) or login_limiter.take()
         if wait > 0:
             resp = templates.TemplateResponse(
                 request, "login.html", _ctx(request, error=True), status_code=429

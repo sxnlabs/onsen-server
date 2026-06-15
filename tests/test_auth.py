@@ -170,6 +170,23 @@ async def test_login_global_cap_not_bypassed_by_ip_rotation(tmp_path):
         assert r.headers.get("retry-after")
 
 
+async def test_locked_ip_does_not_starve_global_bucket(tmp_path):
+    # A per-IP-locked client must not keep consuming global tokens, or it would
+    # 429 logins from every other IP. Burst 6: 5 used while locking one IP, 1 must
+    # remain for a different IP.
+    spa = FakeSpa()
+    limiter = auth.GlobalRateLimiter(rate_per_sec=0.0001, burst=6)
+    async with auth_client(spa, tmp_path, login_limiter=limiter) as client:
+        locked = {"X-Forwarded-For": "10.0.0.1"}
+        for _ in range(5):  # 5 failures → locks 10.0.0.1 (consumes 5 tokens)
+            assert (await client.post("/login", data={"password": "nope"}, headers=locked)).status_code == 401
+        for _ in range(10):  # locked: 429 via per-IP, must NOT touch the bucket
+            assert (await client.post("/login", data={"password": "nope"}, headers=locked)).status_code == 429
+        # a different IP still has a token left → reaches verification, not starved
+        r = await client.post("/login", data={"password": "nope"}, headers={"X-Forwarded-For": "10.0.0.2"})
+        assert r.status_code == 401
+
+
 async def test_session_cookie_secure_only_behind_https(tmp_path):
     spa = FakeSpa()
     async with auth_client(spa, tmp_path) as client:
