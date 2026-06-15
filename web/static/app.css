@@ -273,7 +273,7 @@ header h1 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);  /* 6 steps → balanced 3×2, no orphans */
   gap: 8px;
-  margin: 10px 2px 0;
+  margin: 22px 2px 0;  /* breathing room above the grid, below the setpoint */
 }
 .temp-chip {
   padding: 13px 0;
