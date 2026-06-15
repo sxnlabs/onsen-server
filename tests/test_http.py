@@ -123,6 +123,35 @@ async def test_preset_out_of_range_400():
         assert spa.state["preset_temp"] == 37  # unchanged
 
 
+async def test_panel_renders_quickset_grid():
+    spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "preset_temp": 34})
+    async with app_for(spa) as client:
+        r = await client.get("/panel")
+        assert r.status_code == 200
+        assert "temp-grid" in r.text
+        # balanced 25–40 steps of 3° (not the full degree-by-degree range)
+        assert 'hx-post="/preset/25"' in r.text
+        assert 'hx-post="/preset/34"' in r.text
+        assert 'hx-post="/preset/40"' in r.text
+        assert 'hx-post="/preset/36"' not in r.text  # off-step values omitted
+        # the active setpoint chip is flagged current AND disabled — tapping it
+        # would be a no-op preset that still arms a 60-min manual override
+        assert "is-current" in r.text
+        assert 'aria-current="true" disabled' in r.text
+        # command buttons drive the in-flight (until-ACK) spinner
+        assert 'hx-indicator="#cmd-spinner"' in r.text
+
+
+async def test_index_wires_command_spinner():
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        r = await client.get("/")
+        assert r.status_code == 200
+        # the spinner overlay lives OUTSIDE #panel so SSE swaps never drop it
+        assert 'id="cmd-spinner"' in r.text
+        assert 'hx-indicator="#cmd-spinner"' in r.text
+
+
 async def test_heater_toggle_rejected_without_valid_water_temperature():
     spa = FakeSpa({**FakeSpa.DEFAULT_STATE, "current_temp": 181})
     async with app_for(spa) as client:
