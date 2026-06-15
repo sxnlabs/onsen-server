@@ -44,8 +44,8 @@ Two supported runtimes, same one-process contract:
 # on the remote host, from the repo root
 cp .env.example .env                                 # INTEX_SPA_HOST, HERMES_PASSWORD, WEATHER_*
 cp wireguard/wg0.conf.example wireguard/wg0.conf     # paste the UniFi peer config
+docker compose run --rm onsen python3 probe.py "$INTEX_SPA_HOST"   # read-only: tunnel + spa, BEFORE the app holds the socket
 docker compose up -d --build
-docker compose exec onsen python3 probe.py "$INTEX_SPA_HOST"   # read-only tunnel + spa check
 ```
 
 The spa accepts only ONE TCP client, so the LaunchAgent and the container must never run at the same time — stop one before starting the other. The image CMD runs a single uvicorn in `--factory` mode; never add `--workers`, never scale the `onsen` service. `Dockerfile` is multi-stage (Python 3.12 + `ffmpeg` for the live camera; no Python image deps — cover detection was removed).

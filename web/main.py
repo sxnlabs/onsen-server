@@ -70,6 +70,20 @@ templates.env.globals["ui_toggles"] = UI_TOGGLES
 templates.env.globals["LANGS"] = i18n.LANGS
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP, honoring the proxy chain (Scaleway LB → kamal-proxy)."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _forwarded_https(request: Request) -> bool:
+    """True when the original client reached the edge over HTTPS (so cookies can be Secure)."""
+    proto = request.headers.get("x-forwarded-proto", "")
+    return proto.split(",")[0].strip() == "https" or request.url.scheme == "https"
+
+
 def _intervals_from_points(
     points: list[dict],
     key: str,
@@ -252,6 +266,7 @@ def create_app(
     manual_override_path: str | None = "state/manual_overrides.json",
     pause_path: str | None = "state/pause.json",
     automation_cooldown_path: str | None = "state/automation_cooldowns.json",
+    login_limiter: auth.GlobalRateLimiter | None = None,
     io_threads: int | None = 8,
 ) -> FastAPI:
     weather = (
@@ -278,6 +293,8 @@ def create_app(
         cooldown_path=automation_cooldown_path,
     )
     secret = auth.load_or_create_secret(secret_path) if password else b""
+    login_throttle = auth.LoginThrottle()
+    login_limiter = login_limiter or auth.GlobalRateLimiter()
 
     # -- camera subsystem (master switch via state/camera.json) ----------
     # weather pattern: instantiate once, hold None when unconfigured; every
@@ -365,6 +382,19 @@ def create_app(
             request.headers.get("accept-language"),
         )
         return await call_next(request)
+
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        # Defense-in-depth headers for the internet-exposed UI. Registered last
+        # ⇒ outermost ⇒ also stamps the gate's redirect/401 responses. HSTS is
+        # honored only over HTTPS (the public path via the Scaleway LB).
+        response = await call_next(request)
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
 
     def _ctx(request: Request, **extra) -> dict:
         """Template context with lang + per-render closures.
@@ -472,9 +502,23 @@ def create_app(
 
     @app.post("/login")
     async def login_submit(request: Request):
+        ip = _client_ip(request)
+        # Gate BEFORE verifying the password so guessing is actually bounded.
+        # Per-IP lockout FIRST: an already-locked client must NOT consume a
+        # global token (else one locked IP at ~1 req/s keeps the shared bucket
+        # empty and 429s everyone). Only a non-locked attempt then takes a global
+        # token, which bounds rotated/concurrent sources that evade the per-IP key.
+        wait = login_throttle.retry_after(ip) or login_limiter.take()
+        if wait > 0:
+            resp = templates.TemplateResponse(
+                request, "login.html", _ctx(request, error=True), status_code=429
+            )
+            resp.headers["Retry-After"] = str(wait)
+            return resp
         body = (await request.body()).decode("utf-8", "replace")
         supplied = parse_qs(body).get("password", [""])[0]
         if password and auth.password_ok(supplied, password):
+            login_throttle.reset(ip)
             resp = RedirectResponse("/", status_code=303)
             resp.set_cookie(
                 auth.COOKIE_NAME,
@@ -482,8 +526,10 @@ def create_app(
                 max_age=auth.DEFAULT_MAX_AGE,
                 httponly=True,
                 samesite="lax",
+                secure=_forwarded_https(request),
             )
             return resp
+        login_throttle.record_failure(ip)
         return templates.TemplateResponse(request, "login.html", _ctx(request, error=True), status_code=401)
 
     @app.get("/", response_class=HTMLResponse)
@@ -579,10 +625,12 @@ def create_app(
     @app.get("/healthz")
     async def healthz():
         s = supervisor.state
+        # Public (unauthenticated) endpoint — expose only a coarse boolean, never
+        # the raw error string (it embeds the spa's internal tunnel IP/port).
         return {
             "online": s["online"],
             "updated_at": s["updated_at"],
-            "error": s["error"],
+            "error": s["error"] is not None,
             "paused": supervisor.paused,
         }
 

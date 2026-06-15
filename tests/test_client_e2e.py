@@ -25,6 +25,24 @@ async def test_status_roundtrip():
         await spa.stop()
 
 
+async def test_oversized_frame_does_not_crash(monkeypatch):
+    """A peer sending an oversized/garbled frame (asyncio readline limit overrun
+    raises ValueError) must surface as SpaUnreachable, not an uncaught crash."""
+    spa = FakeSpa()
+    c = await _client_for(spa)
+
+    async def boom(self, *args, **kwargs):
+        raise ValueError("Separator is not found, and chunk exceed the limit")
+
+    monkeypatch.setattr("asyncio.StreamReader.readline", boom)
+    try:
+        with pytest.raises(SpaUnreachable):
+            await c.status()
+    finally:
+        await c.close()
+        await spa.stop()
+
+
 async def test_set_toggles_when_state_differs():
     spa = FakeSpa()  # bubbles starts False
     c = await _client_for(spa)

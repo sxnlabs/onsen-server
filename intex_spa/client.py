@@ -111,7 +111,10 @@ class IntexSpaClient:
                 _LOG.warning("protocol error (attempt %d): %s", attempt + 1, e)
                 if idempotent:
                     await asyncio.sleep(0.5)
-            except (OSError, asyncio.TimeoutError) as e:
+            except (OSError, asyncio.TimeoutError, ValueError) as e:
+                # ValueError = asyncio readline limit overrun: a peer sending an
+                # oversized/garbled frame with no newline. Treat it as a network
+                # error (tear down + retry) instead of letting it escape raw.
                 last_exc = e
                 _LOG.warning("network error (attempt %d): %s", attempt + 1, e)
                 await self._disconnect()
