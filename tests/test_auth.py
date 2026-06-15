@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import httpx
 
 from fake_spa import FakeSpa
+from web import auth
 from web.main import create_app
 
 PW = "hunter2"
@@ -23,6 +24,7 @@ async def auth_client(spa: FakeSpa, tmp_path, password: str | None = PW):
         manual_override_path=None,
         pause_path=None,
         automation_cooldown_path=None,
+        login_fail_delay=0,
         password=password,
         secret_path=str(tmp_path / ".secret"),
     )
@@ -88,3 +90,65 @@ async def test_no_password_means_no_gate(tmp_path):
     spa = FakeSpa()
     async with auth_client(spa, tmp_path, password=None) as client:
         assert (await client.get("/")).status_code == 200
+
+
+# -- hardening for the internet-exposed UI -----------------------------------
+def test_login_throttle_locks_window_and_reset():
+    t = auth.LoginThrottle(max_failures=3, window=100, lockout=50)
+    assert t.retry_after("ip", now=0) == 0
+    t.record_failure("ip", now=0)
+    t.record_failure("ip", now=1)
+    assert t.retry_after("ip", now=2) == 0          # 2 < 3 failures
+    t.record_failure("ip", now=2)                    # 3rd ⇒ locked
+    assert t.retry_after("ip", now=3) > 0
+    assert t.retry_after("ip", now=60) == 0          # lockout expired
+
+    # failures older than the window don't accumulate toward a lock
+    w = auth.LoginThrottle(max_failures=2, window=10, lockout=5)
+    w.record_failure("ip", now=0)
+    w.record_failure("ip", now=20)
+    assert w.retry_after("ip", now=21) == 0
+
+    # a successful login clears the record
+    r = auth.LoginThrottle(max_failures=1, window=10, lockout=5)
+    r.record_failure("ip", now=0)
+    assert r.retry_after("ip", now=1) > 0
+    r.reset("ip")
+    assert r.retry_after("ip", now=1) == 0
+
+
+async def test_login_rate_limited_after_repeated_failures(tmp_path):
+    spa = FakeSpa()
+    async with auth_client(spa, tmp_path) as client:
+        for _ in range(5):
+            assert (await client.post("/login", data={"password": "nope"})).status_code == 401
+        # locked out now — even the *correct* password is refused
+        r = await client.post("/login", data={"password": "nope"})
+        assert r.status_code == 429
+        assert r.headers.get("retry-after")
+        assert (await client.post("/login", data={"password": PW})).status_code == 429
+
+
+async def test_security_headers_present(tmp_path):
+    spa = FakeSpa()
+    async with auth_client(spa, tmp_path) as client:
+        r = await client.get("/login")
+        assert r.headers.get("strict-transport-security", "").startswith("max-age=")
+        assert r.headers.get("x-content-type-options") == "nosniff"
+        assert r.headers.get("x-frame-options") == "DENY"
+        assert "frame-ancestors 'none'" in r.headers.get("content-security-policy", "")
+        assert r.headers.get("referrer-policy") == "no-referrer"
+
+
+async def test_session_cookie_secure_only_behind_https(tmp_path):
+    spa = FakeSpa()
+    async with auth_client(spa, tmp_path) as client:
+        # plain HTTP (e.g. the SSH-tunnel dev path) ⇒ no Secure flag, cookie still works
+        r = await client.post("/login", data={"password": PW})
+        assert "spa_session=" in r.headers.get("set-cookie", "")
+        assert "Secure" not in r.headers.get("set-cookie", "")
+        # behind the TLS-terminating LB (X-Forwarded-Proto: https) ⇒ Secure flag
+        r2 = await client.post(
+            "/login", data={"password": PW}, headers={"X-Forwarded-Proto": "https"}
+        )
+        assert "Secure" in r2.headers.get("set-cookie", "")

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 COOKIE_NAME = "spa_session"
-DEFAULT_MAX_AGE = 30 * 24 * 3600  # 30 days
+DEFAULT_MAX_AGE = 14 * 24 * 3600  # 14 days
 
 
 def load_or_create_secret(path: str | Path) -> bytes:
@@ -56,3 +56,44 @@ def token_valid(
 
 def password_ok(supplied: str | None, expected: str) -> bool:
     return hmac.compare_digest((supplied or "").encode(), (expected or "").encode())
+
+
+class LoginThrottle:
+    """In-memory per-client failed-login limiter (single-process app).
+
+    After `max_failures` failures within `window` seconds, a client is locked
+    out for `lockout` seconds (`retry_after` then returns the remaining time).
+    A successful login clears the client's record.
+
+    Best-effort: the client key is the forwarded IP, which a determined attacker
+    can rotate — so the caller also imposes a fixed per-attempt delay on failure,
+    bounding total throughput regardless of source IP. Together with a
+    high-entropy password this makes online guessing infeasible.
+    """
+
+    def __init__(self, max_failures: int = 5, window: float = 900.0, lockout: float = 900.0) -> None:
+        self.max_failures = max_failures
+        self.window = window
+        self.lockout = lockout
+        self._fails: dict[str, list[float]] = {}
+        self._until: dict[str, float] = {}
+
+    def retry_after(self, key: str, now: float | None = None) -> int:
+        """Seconds the client must wait, or 0 if not locked out."""
+        now = time.time() if now is None else now
+        until = self._until.get(key, 0.0)
+        return int(until - now) + 1 if until > now else 0
+
+    def record_failure(self, key: str, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        recent = [t for t in self._fails.get(key, []) if now - t < self.window]
+        recent.append(now)
+        if len(recent) >= self.max_failures:
+            self._until[key] = now + self.lockout
+            self._fails.pop(key, None)
+        else:
+            self._fails[key] = recent
+
+    def reset(self, key: str) -> None:
+        self._fails.pop(key, None)
+        self._until.pop(key, None)
