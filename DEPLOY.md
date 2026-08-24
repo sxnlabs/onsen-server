@@ -126,6 +126,16 @@ What earns a text, one per episode plus one when it clears:
 | Heater on ≥2 h without gaining 1 °C | the window itself — `ONSEN_ALERT_HEATING_STALL_HOURS` |
 | Water at/below 30 °C with a higher setpoint | 15 min — `ONSEN_ALERT_WATER_LOW_C`, `off` to disable |
 
+On the **LaunchAgent** path there is no `.env` and launchd carries no environment
+of its own, so `install.sh` writes the same settings to `state/.sms` (0600, kept
+out of the plist, exactly like `state/.password`):
+
+```bash
+ONSEN_SMS_TO=+336xxxxxxxx OVH_APPLICATION_KEY=… OVH_APPLICATION_SECRET=… \
+  OVH_CONSUMER_KEY=… OVH_SMS_SERVICE=sms-xxxxxxx-1 \
+  INTEX_SPA_HOST=<spa-ip> ./install.sh
+```
+
 `state/alerts.json` remembers open episodes, so a redeploy in the middle of an
 outage doesn't text you a second time. To test the wiring end-to-end without
 waiting an hour, drop `ONSEN_ALERT_UNREACHABLE_AFTER=60` and pull the spa's plug.

@@ -33,6 +33,32 @@ uv run python -m pytest -q
 
 mkdir -p state
 
+# SMS alerting (optional): persisted to state/.sms, kept out of the plist.
+# launchd carries no environment, so anything not written here is lost — and
+# these are OVH credentials, which don't belong in a world-readable plist.
+if [ -n "${ONSEN_SMS_TO:-}" ]; then
+  : "${OVH_APPLICATION_KEY:?set OVH_APPLICATION_KEY alongside ONSEN_SMS_TO}"
+  : "${OVH_APPLICATION_SECRET:?set OVH_APPLICATION_SECRET alongside ONSEN_SMS_TO}"
+  : "${OVH_CONSUMER_KEY:?set OVH_CONSUMER_KEY alongside ONSEN_SMS_TO}"
+  : "${OVH_SMS_SERVICE:?set OVH_SMS_SERVICE alongside ONSEN_SMS_TO}"
+  {
+    echo "ONSEN_SMS_TO=$ONSEN_SMS_TO"
+    echo "OVH_APPLICATION_KEY=$OVH_APPLICATION_KEY"
+    echo "OVH_APPLICATION_SECRET=$OVH_APPLICATION_SECRET"
+    echo "OVH_CONSUMER_KEY=$OVH_CONSUMER_KEY"
+    echo "OVH_SMS_SERVICE=$OVH_SMS_SERVICE"
+    [ -n "${OVH_SMS_SENDER:-}" ] && echo "OVH_SMS_SENDER=$OVH_SMS_SENDER"
+    [ -n "${ONSEN_ALERT_UNREACHABLE_AFTER:-}" ] && echo "ONSEN_ALERT_UNREACHABLE_AFTER=$ONSEN_ALERT_UNREACHABLE_AFTER"
+    [ -n "${ONSEN_ALERT_WATER_LOW_C:-}" ] && echo "ONSEN_ALERT_WATER_LOW_C=$ONSEN_ALERT_WATER_LOW_C"
+    [ -n "${ONSEN_ALERT_HEATING_STALL_HOURS:-}" ] && echo "ONSEN_ALERT_HEATING_STALL_HOURS=$ONSEN_ALERT_HEATING_STALL_HOURS"
+    true
+  } > state/.sms
+  chmod 600 state/.sms
+  echo "→ SMS alerting armed (state/.sms)"
+elif [ -f state/.sms ]; then
+  echo "→ SMS alerting kept from state/.sms"
+fi
+
 # UI password (optional): persisted to state/.password, kept out of the plist
 if [ -n "${HERMES_PASSWORD:-}" ]; then
   printf '%s' "$HERMES_PASSWORD" > state/.password

@@ -862,6 +862,32 @@ def _configured_io_threads() -> int:
     return max(1, value)
 
 
+def _alerting_env(state_path: str = "state/.sms") -> dict:
+    """Alerting settings: `state/.sms` (key=value), overridden by the real env.
+
+    launchd carries no environment of its own, so on the LaunchAgent path
+    anything not baked into the plist is lost — and these are credentials, which
+    belong in a 0600 file rather than a world-readable plist. Same split as the
+    UI password (`state/.password`, written by install.sh, kept out of the plist).
+    """
+    values: dict[str, str] = {}
+    path = Path(state_path)
+    if path.exists():
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            _ALERT_LOG.warning("failed to read %s", state_path, exc_info=True)
+            lines = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    values.update({k: v for k, v in os.environ.items() if v})
+    return values
+
+
 def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
     """Build the SMS sender from the environment, or None when not configured.
 
@@ -869,8 +895,9 @@ def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
     looks like alerting is on and texts nothing — so it's logged loudly rather
     than degrading in silence.
     """
-    recipient = (os.environ.get("ONSEN_SMS_TO") or "").strip()
-    credentials = OvhCredentials.from_env()
+    env = _alerting_env()
+    recipient = (env.get("ONSEN_SMS_TO") or "").strip()
+    credentials = OvhCredentials.from_env(env)
     if bool(recipient) != bool(credentials):
         _ALERT_LOG.error(
             "SMS alerting is half-configured (%s) — no alert will be sent",
@@ -878,11 +905,11 @@ def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
         )
     sender = SmsSender(credentials, recipient) if (recipient and credentials) else None
 
-    floor = (os.environ.get("ONSEN_ALERT_WATER_LOW_C") or "").strip().lower()
+    floor = (env.get("ONSEN_ALERT_WATER_LOW_C") or "").strip().lower()
     config = AlertConfig(
-        unreachable_after=float(os.environ.get("ONSEN_ALERT_UNREACHABLE_AFTER", "3600")),
+        unreachable_after=float(env.get("ONSEN_ALERT_UNREACHABLE_AFTER") or 3600),
         water_low_c=None if floor in ("off", "none", "0") else float(floor or 30.0),
-        heating_stall_hours=float(os.environ.get("ONSEN_ALERT_HEATING_STALL_HOURS", "2")),
+        heating_stall_hours=float(env.get("ONSEN_ALERT_HEATING_STALL_HOURS") or 2),
     )
     return sender, config
 

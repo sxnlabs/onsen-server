@@ -246,3 +246,106 @@ async def test_state_file_records_the_episode(tmp_path):
     saved = json.loads((tmp_path / "alerts.json").read_text())
     assert saved[UNREACHABLE]["notified_at"] == NOW
     assert watchdog.snapshot()["episodes"][UNREACHABLE]["notified"] is True
+
+
+# -- what the spa can't tell us while it's offline -----------------------------
+
+
+async def test_offline_does_not_resolve_a_spa_side_episode(tmp_path):
+    """An E90 followed by a connectivity loss must not text "erreur disparue"."""
+    sender = FakeSender()
+    faulty = dict(OK, error_code="E90")
+    watchdog = monitor(
+        tmp_path, sender, online=True, status=faulty, last_ok_at=NOW,
+        config=AlertConfig(error_code_after=0),
+    )
+    await watchdog.tick(now=NOW)
+    assert len(sender.sent) == 1 and "E90" in sender.sent[0]
+
+    # Spa drops off the network, still inside the unreachable delay.
+    watchdog.supervisor.state["online"] = False
+    watchdog.supervisor.last_ok_at = NOW
+    await watchdog.tick(now=NOW + 60)
+    assert len(sender.sent) == 1  # nothing observed, nothing announced
+
+    # Back online, error gone: now we've actually seen it clear.
+    watchdog.supervisor.state.update(online=True, status=dict(OK))
+    watchdog.supervisor.last_ok_at = NOW + 120
+    await watchdog.tick(now=NOW + 120)
+    assert len(sender.sent) == 2
+    assert "erreur disparue" in sender.sent[1]
+
+
+async def test_resolution_sms_is_retried_until_it_lands(tmp_path):
+    sender = FakeSender()
+    watchdog = monitor(tmp_path, sender)
+    await watchdog.tick(now=NOW)
+    assert len(sender.sent) == 1
+
+    sender.ok = False
+    watchdog.supervisor.state["online"] = True
+    watchdog.supervisor.last_ok_at = NOW + 60
+    await watchdog.tick(now=NOW + 60)
+    assert len(sender.sent) == 1
+    assert watchdog.snapshot()["episodes"][UNREACHABLE]["clearing"] is True
+
+    sender.ok = True
+    await watchdog.tick(now=NOW + 120)
+    assert len(sender.sent) == 2
+    assert watchdog.snapshot()["episodes"] == {}
+
+
+async def test_a_condition_that_comes_back_cancels_its_pending_resolution(tmp_path):
+    sender = FakeSender(ok=False)
+    watchdog = monitor(tmp_path, sender)
+    watchdog.sender.ok = True
+    await watchdog.tick(now=NOW)
+
+    sender.ok = False  # resolution can't go out
+    watchdog.supervisor.state["online"] = True
+    watchdog.supervisor.last_ok_at = NOW + 60
+    await watchdog.tick(now=NOW + 60)
+
+    # Down again, and silent long enough to re-fire, before we could say it was
+    # back. From the owner's side the incident never closed: no second alert,
+    # and the stale resolution must not go out either.
+    sender.ok = True
+    watchdog.supervisor.state["online"] = False
+    await watchdog.tick(now=NOW + 5000)
+    assert len(sender.sent) == 1
+    assert watchdog.snapshot()["episodes"][UNREACHABLE]["clearing"] is False
+
+
+def test_error_text_omits_the_water_when_the_frame_has_none():
+    """decode_status() sets current_temp=None exactly when it sets error_code."""
+    faulty = {"current_temp": None, "preset_temp": 37, "heater": True, "error_code": "E90"}
+    firing = evaluate(
+        online=True, status=faulty, last_ok_at=NOW, samples=[], config=AlertConfig(), now=NOW
+    )
+    assert "None" not in firing[ERROR_CODE]
+    assert "E90" in firing[ERROR_CODE]
+
+
+def test_a_gap_in_the_samples_is_not_a_stall():
+    """Two heater-on points either side of a polling outage span the window but
+    say nothing about the hours in between."""
+    samples = [
+        {"t": NOW - 7200, "cur": 30, "set": 38, "heat": True},
+        {"t": NOW - 60, "cur": 30, "set": 38, "heat": True},
+    ]
+    firing = evaluate(
+        online=True, status=OK, last_ok_at=NOW, samples=samples, config=AlertConfig(), now=NOW
+    )
+    assert HEATING_STALLED not in firing
+
+
+async def test_history_lookback_covers_a_long_unreachable_delay(tmp_path):
+    """A restart 5h into an outage, with a 6h threshold: the last sample is still
+    in TempHistory and must be found, or the outage clock restarts from boot."""
+    sender = FakeSender()
+    watchdog = monitor(
+        tmp_path, sender, last_ok_at=None, config=AlertConfig(unreachable_after=6 * 3600)
+    )
+    watchdog.supervisor.history.record(36, 37, True, ts=NOW - 7 * 3600)
+    await watchdog.tick(now=NOW)
+    assert len(sender.sent) == 1

@@ -97,6 +97,7 @@ web/auth.py              optional signed-cookie gate (HERMES_PASSWORD); UI-only,
 - `alerts.json` — open alert episodes and whether each was already texted; this is what stops a restart mid-outage from sending the same SMS again.
 - `.secret` — HMAC key for login cookies (generated on first run when `HERMES_PASSWORD` is set).
 - `.password` — optional password file written by `install.sh` (alternative to the env var).
+- `.sms` — optional `key=value` alerting config (recipient + OVH credentials) written by `install.sh`, 0600. launchd carries no environment, so on the LaunchAgent path this is where alerting is configured; the real env always wins over it. Kept out of the plist on purpose.
 
 ## Things to avoid
 

@@ -73,3 +73,31 @@ def test_describe_never_returns_an_empty_string():
     assert describe(TimeoutError()) == "TimeoutError"
     assert describe(ConnectionResetError()) == "ConnectionResetError"
     assert describe(ValueError("boom")) == "ValueError: boom"
+
+
+def test_alerting_env_reads_the_state_file_and_the_env_wins(tmp_path, monkeypatch):
+    """launchd carries no env: state/.sms is where the LaunchAgent path finds these."""
+    from web.main import _alerting_env
+
+    state = tmp_path / ".sms"
+    state.write_text(
+        "# written by install.sh\n"
+        "ONSEN_SMS_TO=+33600000000\n"
+        'OVH_APPLICATION_KEY="ak"\n'
+        "\n"
+        "OVH_SMS_SERVICE=sms-file-1\n"
+    )
+    monkeypatch.setenv("OVH_SMS_SERVICE", "sms-env-1")
+
+    values = _alerting_env(str(state))
+    assert values["ONSEN_SMS_TO"] == "+33600000000"
+    assert values["OVH_APPLICATION_KEY"] == "ak"   # quotes stripped
+    assert values["OVH_SMS_SERVICE"] == "sms-env-1"  # the real env overrides the file
+
+
+def test_alerting_env_is_empty_without_a_state_file(tmp_path, monkeypatch):
+    from web.main import _alerting_env
+
+    for name in (*ENV, "ONSEN_SMS_TO"):
+        monkeypatch.delenv(name, raising=False)
+    assert OvhCredentials.from_env(_alerting_env(str(tmp_path / "nope"))) is None

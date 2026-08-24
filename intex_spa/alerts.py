@@ -49,6 +49,10 @@ class AlertConfig:
     water_low_after: float = 900.0
     heating_stall_hours: float = 2.0       # window over which heat must produce a rise
     heating_stall_min_rise: float = 1.0    # degrees C
+    # History records a point on change or every 60s, and only on a *successful*
+    # poll. A hole wider than this means we weren't watching — the heater could
+    # have been anything in between, so the window can't be judged.
+    sample_max_gap: float = 600.0
 
     def delay_for(self, key: str) -> float:
         """How long the *monitor* holds a condition before texting.
@@ -112,10 +116,15 @@ def evaluate(
 
     code = status.get("error_code")
     if code:
-        firing[ERROR_CODE] = (
-            f"Onsen: le spa signale l'erreur {code}. "
-            f"Eau {status.get('current_temp')}C, consigne {status.get('preset_temp')}C."
+        # An error frame carries no reading: `decode_status` sets current_temp to
+        # None precisely when it sets error_code. Saying "Eau NoneC" in the one
+        # SMS about a sensor fault would be a bad joke.
+        water = (
+            f" Eau {status['current_temp']}C, consigne {status.get('preset_temp')}C."
+            if status.get("current_temp") is not None
+            else f" Consigne {status.get('preset_temp')}C."
         )
+        firing[ERROR_CODE] = f"Onsen: le spa signale l'erreur {code}.{water}"
 
     stall = _heating_stalled(samples=samples, config=config, now=now)
     if stall is not None:
@@ -160,6 +169,11 @@ def _heating_stalled(
         return None
     # Tolerate one missed sample at the edge (history throttles at 60s).
     if window[-1]["t"] - window[0]["t"] < window_seconds - 120:
+        return None
+    # Covered is not the same as continuous: two heater-on samples two hours
+    # apart, either side of a polling outage, would otherwise read as two hours
+    # of stalled heat. We only know what we sampled.
+    if any(b["t"] - a["t"] > config.sample_max_gap for a, b in zip(window, window[1:])):
         return None
     if not all(p.get("heat") for p in window):
         return None
@@ -242,11 +256,20 @@ class AlertMonitor:
         now = time.time() if now is None else now
         state = self.supervisor.state
         status = state.get("status")
+        online = bool(state.get("online"))
+        # Wide enough for the stall window *and* for `_last_ok_at` to still find
+        # the last good sample after a restart, however long the outage delay is
+        # configured to be.
         samples = self.supervisor.history.recent(
-            hours=max(self.config.heating_stall_hours * 2, 3.0), now=now
+            hours=max(
+                self.config.heating_stall_hours * 2,
+                self.config.unreachable_after / 3600 + 1,
+                3.0,
+            ),
+            now=now,
         )
         firing = evaluate(
-            online=bool(state.get("online")),
+            online=online,
             status=status,
             last_ok_at=self._last_ok_at(samples),
             samples=samples,
@@ -261,6 +284,8 @@ class AlertMonitor:
                 episode = {"since": now, "notified_at": None}
                 self._episodes[key] = episode
                 changed = True
+            elif episode.pop("cleared_at", None) is not None:
+                changed = True  # it came back before we could announce it was over
             if episode["notified_at"] is None and now - episode["since"] >= self.config.delay_for(key):
                 # A failed send leaves notified_at None: the next tick retries
                 # rather than losing the alert to a transient OVH error.
@@ -269,10 +294,22 @@ class AlertMonitor:
                     changed = True
 
         for key in [k for k in self._episodes if k not in firing]:
-            episode = self._episodes.pop(key)
+            # Only a fresh online frame can clear a spa-side condition. While the
+            # spa is unreachable `evaluate()` deliberately says nothing about it,
+            # and reading that silence as "resolved" would text "erreur disparue"
+            # off a stale frame — the opposite of the truth, right after an E90.
+            if key != UNREACHABLE and not online:
+                continue
+            episode = self._episodes[key]
             changed = True
-            if episode.get("notified_at") is not None:
-                await self.sender.send(resolution_message(key, status))
+            if episode.get("notified_at") is None:
+                self._episodes.pop(key)
+                continue
+            # Owe a resolution SMS: keep the episode until it actually goes out,
+            # same retry contract as the opening alert.
+            episode.setdefault("cleared_at", now)
+            if await self.sender.send(resolution_message(key, status)):
+                self._episodes.pop(key)
 
         if changed:
             self._save()
@@ -285,6 +322,7 @@ class AlertMonitor:
                 key: {
                     "since": episode["since"],
                     "notified": episode.get("notified_at") is not None,
+                    "clearing": episode.get("cleared_at") is not None,
                 }
                 for key, episode in self._episodes.items()
             },
