@@ -244,7 +244,7 @@ async def test_state_file_records_the_episode(tmp_path):
     await watchdog.tick(now=NOW)
 
     saved = json.loads((tmp_path / "alerts.json").read_text())
-    assert saved[UNREACHABLE]["notified_at"] == NOW
+    assert saved["episodes"][UNREACHABLE]["notified_at"] == NOW
     assert watchdog.snapshot()["episodes"][UNREACHABLE]["notified"] is True
 
 
@@ -348,4 +348,57 @@ async def test_history_lookback_covers_a_long_unreachable_delay(tmp_path):
     )
     watchdog.supervisor.history.record(36, 37, True, ts=NOW - 7 * 3600)
     await watchdog.tick(now=NOW)
+    assert len(sender.sent) == 1
+
+
+def test_the_live_heater_state_outranks_the_window():
+    """record() can drop a heater-off point (same temp, <60s), leaving the window
+    all-heat after the heater actually stopped."""
+    off = dict(OK, heater=False)
+    firing = evaluate(
+        online=True, status=off, last_ok_at=NOW,
+        samples=heating_samples(hours=2, rise=0),
+        config=AlertConfig(), now=NOW,
+    )
+    assert HEATING_STALLED not in firing
+
+
+async def test_no_resolution_while_the_spa_is_offline_again(tmp_path):
+    """Reconnect, failed resolution, then a second outage still under the
+    threshold: "de nouveau joignable" must not go out on top of a dead link."""
+    sender = FakeSender()
+    watchdog = monitor(tmp_path, sender)
+    await watchdog.tick(now=NOW)
+
+    sender.ok = False
+    watchdog.supervisor.state["online"] = True
+    watchdog.supervisor.last_ok_at = NOW + 60
+    await watchdog.tick(now=NOW + 60)
+    assert len(sender.sent) == 1
+
+    sender.ok = True
+    watchdog.supervisor.state["online"] = False  # down again, under the delay
+    await watchdog.tick(now=NOW + 300)
+    assert len(sender.sent) == 1
+    assert watchdog.snapshot()["episodes"][UNREACHABLE]["clearing"] is True
+
+
+async def test_an_error_frame_still_dates_the_outage_after_a_restart(tmp_path):
+    """A spa answering E90 replies successfully but writes no history point, so
+    the temp series alone would date the outage hours too early."""
+    sender = FakeSender()
+    faulty = {"current_temp": None, "preset_temp": 37, "heater": True, "error_code": "E90"}
+    config = AlertConfig(error_code_after=10_000)  # keep the E90 alert out of the way
+    watchdog = monitor(tmp_path, sender, online=True, status=faulty, last_ok_at=NOW, config=config)
+    watchdog.supervisor.history.record(36, 37, True, ts=NOW - 6 * 3600)  # last real reading
+    await watchdog.tick(now=NOW)
+    assert sender.sent == []
+
+    # Restart: last_ok_at is gone, the newest sample is six hours old.
+    restarted = monitor(tmp_path, sender, online=False, status=faulty, last_ok_at=None, config=config)
+    restarted.supervisor.history.record(36, 37, True, ts=NOW - 6 * 3600)
+    await restarted.tick(now=NOW + 600)
+    assert sender.sent == []  # the link failed ten minutes ago, not six hours ago
+
+    await restarted.tick(now=NOW + 3700)
     assert len(sender.sent) == 1

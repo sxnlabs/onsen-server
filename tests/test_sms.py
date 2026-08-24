@@ -101,3 +101,15 @@ def test_alerting_env_is_empty_without_a_state_file(tmp_path, monkeypatch):
     for name in (*ENV, "ONSEN_SMS_TO"):
         monkeypatch.delenv(name, raising=False)
     assert OvhCredentials.from_env(_alerting_env(str(tmp_path / "nope"))) is None
+
+
+def test_an_empty_env_value_disables_a_persisted_recipient(tmp_path, monkeypatch):
+    """`ONSEN_SMS_TO=` is the documented off switch — a stale state/.sms must not
+    keep texting through it."""
+    from web.main import _alerting_env
+
+    state = tmp_path / ".sms"
+    state.write_text("ONSEN_SMS_TO=+33600000000\n")
+    monkeypatch.setenv("ONSEN_SMS_TO", "")
+
+    assert _alerting_env(str(state))["ONSEN_SMS_TO"] == ""

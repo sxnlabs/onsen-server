@@ -884,7 +884,9 @@ def _alerting_env(state_path: str = "state/.sms") -> dict:
                 continue
             key, _, value = line.partition("=")
             values[key.strip()] = value.strip().strip('"').strip("'")
-    values.update({k: v for k, v in os.environ.items() if v})
+    # Not `if v`: an explicitly empty ONSEN_SMS_TO is how alerting is turned off,
+    # and dropping empty overrides would leave a stale state/.sms texting on.
+    values.update(os.environ)
     return values
 
 

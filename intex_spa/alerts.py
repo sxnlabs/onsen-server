@@ -126,7 +126,15 @@ def evaluate(
         )
         firing[ERROR_CODE] = f"Onsen: le spa signale l'erreur {code}.{water}"
 
-    stall = _heating_stalled(samples=samples, config=config, now=now)
+    # The live frame outranks the window: `TempHistory.record()` drops a
+    # heater-off observation when the temperature hasn't moved and the last
+    # point is under a minute old, so the window can still read all-heat after
+    # the heater actually stopped.
+    stall = (
+        _heating_stalled(samples=samples, config=config, now=now)
+        if status.get("heater")
+        else None
+    )
     if stall is not None:
         rise, hours = stall
         firing[HEATING_STALLED] = (
@@ -186,6 +194,11 @@ def _heating_stalled(
     return float(rise), config.heating_stall_hours
 
 
+# How stale the persisted "the spa answered" witness may get. It exists only to
+# survive a restart, so a coarse resolution is enough — and this is one small
+# write every ten minutes, not one per tick.
+WITNESS_INTERVAL = 600.0
+
 _RESOLVED = {
     UNREACHABLE: "spa de nouveau joignable",
     ERROR_CODE: "erreur disparue",
@@ -225,7 +238,7 @@ class AlertMonitor:
         self.state_path = Path(state_path) if state_path else None
         self.interval = interval
         self.started_at = time.time()
-        self._episodes: dict[str, dict] = self._load()
+        self._episodes, self._last_ok_witness = self._load()
         self._task: asyncio.Task | None = None
 
     # -- lifecycle ------------------------------------------------------------
@@ -277,7 +290,7 @@ class AlertMonitor:
             now=now,
         )
 
-        changed = False
+        changed = self._witness(self.supervisor.last_ok_at)
         for key, message in firing.items():
             episode = self._episodes.get(key)
             if episode is None:
@@ -293,13 +306,13 @@ class AlertMonitor:
                     episode["notified_at"] = now
                     changed = True
 
-        for key in [k for k in self._episodes if k not in firing]:
-            # Only a fresh online frame can clear a spa-side condition. While the
-            # spa is unreachable `evaluate()` deliberately says nothing about it,
-            # and reading that silence as "resolved" would text "erreur disparue"
-            # off a stale frame — the opposite of the truth, right after an E90.
-            if key != UNREACHABLE and not online:
-                continue
+        # Nothing is announced as over while the spa is unreachable. For a
+        # spa-side rule `evaluate()` deliberately says nothing, and reading that
+        # silence as recovery would text "erreur disparue" off a stale frame,
+        # right after an E90. And an outage that reconnects, fails to send its
+        # resolution, then drops again below the threshold is not "de nouveau
+        # joignable" either — it just isn't firing yet.
+        for key in [k for k in self._episodes if k not in firing] if online else []:
             episode = self._episodes[key]
             changed = True
             if episode.get("notified_at") is None:
@@ -329,36 +342,53 @@ class AlertMonitor:
         }
 
     # -- internals ------------------------------------------------------------
+    def _witness(self, last_ok_at: float | None) -> bool:
+        """Remember, coarsely, that the spa answered. True when it moved enough to save."""
+        if last_ok_at is None:
+            return False
+        if self._last_ok_witness is not None and last_ok_at - self._last_ok_witness < WITNESS_INTERVAL:
+            return False
+        self._last_ok_witness = last_ok_at
+        return True
+
     def _last_ok_at(self, samples: list[dict]) -> float | None:
         """When the spa last answered.
 
         `supervisor.last_ok_at` is the truth while the process lives. After a
-        restart mid-outage it's None, and the newest history sample is the next
-        best witness — without it a reboot would reset the one-hour clock and an
-        outage across a redeploy would never text. A cold start that has never
-        reached the spa falls back to process start.
+        restart mid-outage it's None — without a fallback a reboot would reset
+        the one-hour clock and an outage across a redeploy would never text.
+
+        The persisted witness leads the newest history sample because a spa
+        answering with an *error* frame is a successful reply that writes no
+        history point (`decode_status` sets current_temp=None with the error
+        code): during a sustained E90 the temp series stops entirely, and
+        trusting it alone would date the outage hours too early.
         """
         if getattr(self.supervisor, "last_ok_at", None) is not None:
             return self.supervisor.last_ok_at
-        if samples:
-            return samples[-1]["t"]
-        return self.started_at
+        candidates = [t for t in (self._last_ok_witness, samples[-1]["t"] if samples else None) if t]
+        return max(candidates) if candidates else self.started_at
 
-    def _load(self) -> dict[str, dict]:
+    def _load(self) -> tuple[dict[str, dict], float | None]:
         if self.state_path is None or not self.state_path.exists():
-            return {}
+            return {}, None
         try:
             raw = json.loads(self.state_path.read_text())
         except (OSError, json.JSONDecodeError):
             _LOG.warning("failed to read alert state", exc_info=True)
-            return {}
+            return {}, None
         if not isinstance(raw, dict):
-            return {}
-        return {
-            key: value
-            for key, value in raw.items()
-            if isinstance(value, dict) and isinstance(value.get("since"), (int, float))
-        }
+            return {}, None
+        episodes = raw.get("episodes") if isinstance(raw.get("episodes"), dict) else raw
+        witness = raw.get("last_ok_at")
+        return (
+            {
+                key: value
+                for key, value in episodes.items()
+                if isinstance(value, dict) and isinstance(value.get("since"), (int, float))
+            },
+            witness if isinstance(witness, (int, float)) else None,
+        )
 
     def _save(self) -> None:
         if self.state_path is None:
@@ -366,7 +396,9 @@ class AlertMonitor:
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(self._episodes))
+            tmp.write_text(
+                json.dumps({"episodes": self._episodes, "last_ok_at": self._last_ok_witness})
+            )
             tmp.replace(self.state_path)
         except OSError:
             _LOG.warning("failed to persist alert state", exc_info=True)
