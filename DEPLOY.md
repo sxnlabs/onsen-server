@@ -89,6 +89,51 @@ must never run at the same time.
 3. Once the remote instance looks healthy, leave the agent off — the Mac can be
    shut down.
 
+## 6. Arm the SMS alerting
+
+On 2026-08-22 the spa dropped off the network at 20:34 in mid-heat and nobody
+knew for 46 hours: the UI kept showing the last good reading, `/healthz` kept
+answering 200, and the only trace was `network error (attempt 1):` in the logs.
+
+Onsen now texts its owner itself. It does **not** route through Argos: Argos runs
+on this same host, so it can't be what notices this host go away — and a
+spa-side fault (an E90, a heat cycle that stopped climbing) is something only
+Onsen can name in the message.
+
+Fill in `.env` (all of it, or none — see `.env.example`):
+
+```bash
+ONSEN_SMS_TO=+336xxxxxxxx
+OVH_APPLICATION_KEY=…        # same OVH SMS account Argos uses
+OVH_APPLICATION_SECRET=…
+OVH_CONSUMER_KEY=…
+OVH_SMS_SERVICE=sms-xxxxxxx-1
+```
+
+Then `docker compose up -d` and confirm it's armed:
+
+```bash
+curl -fsS http://127.0.0.1:8731/api/alerts     # {"enabled": true, "config": {...}, "episodes": {}}
+docker compose logs onsen | grep -i sms        # an error here = half-configured
+```
+
+What earns a text, one per episode plus one when it clears:
+
+| Condition | Fires after |
+| --- | --- |
+| Spa unreachable (spa, tunnel or host) | 1 h of silence — `ONSEN_ALERT_UNREACHABLE_AFTER` |
+| The spa reports an error code (E90…) | 5 min |
+| Heater on ≥2 h without gaining 1 °C | the window itself — `ONSEN_ALERT_HEATING_STALL_HOURS` |
+| Water at/below 30 °C with a higher setpoint | 15 min — `ONSEN_ALERT_WATER_LOW_C`, `off` to disable |
+
+`state/alerts.json` remembers open episodes, so a redeploy in the middle of an
+outage doesn't text you a second time. To test the wiring end-to-end without
+waiting an hour, drop `ONSEN_ALERT_UNREACHABLE_AFTER=60` and pull the spa's plug.
+
+**What this still doesn't cover:** if the whole host dies, nothing on it can text
+you. `/spa-healthz` (public, 503 as soon as the spa link is stale) is there for an
+off-host monitor to poll — put one somewhere other than this machine.
+
 ## Notes
 
 - **One process only.** Never `docker compose up --scale onsen=2`, never add a

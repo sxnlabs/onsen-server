@@ -62,6 +62,8 @@ The spa accepts only ONE TCP client, so the LaunchAgent and the container must n
 
 **Stale-but-useful on error.** `Supervisor._set_state` keeps the last known status across failed polls; the UI shows an offline banner with the last reading. Don't clear state on errors.
 
+**Stale-but-useful is not "fine".** The flip side of the rule above: on 2026-08-22 the spa dropped off the network at 20:34 mid-heat and nothing said so for 46 hours — the panel showed a plausible stale reading and `/healthz` answered 200 the whole time. Two consequences to preserve. `supervisor.last_ok_at` is the *only* honest clock for an outage (`state["updated_at"]` moves on failed polls too), and `/healthz` stays 200 for the container healthcheck while `/spa-healthz` is the one that goes 503. Alerting is Onsen's own job, not Argos's: Argos runs on the same host, so it cannot be what notices that host is gone.
+
 **Manual override window.** UI actions call `scheduler.note_manual(field)` to set a 60-min per-field freeze so the scheduler doesn't immediately revert a hand toggle. Any new write path from the UI must do the same.
 
 **Python is pinned to 3.12 via `.python-version`.** CPython 3.14 silently killed the service after ~30 s under launchd on this machine (uvicorn's native deps — `uvloop`/`httptools`/`pydantic-core` — produced a segfault with no Python traceback). Don't bump the interpreter without first running the LaunchAgent for ≥30 min and checking `~/Library/Logs/DiagnosticReports/` for fresh Python `.ips` files. See `~/Specs/Onsen/server.md` "Design constraints" for the full story.
@@ -74,6 +76,9 @@ intex_spa/client.py      one async TCP socket + lock + retries
 intex_spa/supervisor.py  owns the client; poll loop; SSE fanout; history record on each refresh
 intex_spa/history.py     JSONL temp samples, throttled (new point on change or ≥60s), 7-day retention
 intex_spa/weather.py     Open-Meteo client, in-memory + state/weather.json cache (30 min TTL), fail-soft
+intex_spa/alerts.py      pure evaluate() (unreachable / error code / stalled heat / water floor) + AlertMonitor loop
+intex_spa/sms.py         OVH SMS sender (stdlib urllib, v1 signature), opt-in, never raises
+intex_spa/errors.py      describe(exc) — never-empty one-liner for exceptions whose str() is ""
 intex_spa/schedule.py    config validation + pure evaluate() + effective_heat_rate() calibration
 intex_spa/scheduler.py   async reconciler, manual-override tracking, weather-aware heat-rate sizing
 web/main.py              FastAPI factory; lifespan starts supervisor + scheduler; HTMX/SSE routes
@@ -89,6 +94,7 @@ web/auth.py              optional signed-cookie gate (HERMES_PASSWORD); UI-only,
 - `pause.json` — persisted automation pause flag; prevents restart from resuming comfort writes unexpectedly.
 - `automation_cooldowns.json` — persisted relay cooldown timestamps; prevents restart from clearing anti-chatter protection.
 - `weather.json` — last good Open-Meteo snapshot (kept across restarts so cold starts aren't blind).
+- `alerts.json` — open alert episodes and whether each was already texted; this is what stops a restart mid-outage from sending the same SMS again.
 - `.secret` — HMAC key for login cookies (generated on first run when `HERMES_PASSWORD` is set).
 - `.password` — optional password file written by `install.sh` (alternative to the env var).
 

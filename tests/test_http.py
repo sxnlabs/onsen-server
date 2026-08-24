@@ -183,6 +183,25 @@ async def test_healthz():
         assert isinstance(body["error"], bool)  # coarse only — never the raw error string
 
 
+async def test_spa_healthz_goes_red_when_the_link_dies():
+    """The gap the 2026-08-22 outage fell through: /healthz stayed 200 for 46h."""
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        assert (await client.get("/spa-healthz")).status_code == 200
+
+        # Same process, same app — only the spa stopped answering.
+        client.app.state.supervisor.last_ok_at = None
+        r = await client.get("/spa-healthz")
+        assert r.status_code == 503
+        assert (await client.get("/healthz")).status_code == 200  # container still healthy
+
+
+async def test_alerts_endpoint_reports_when_sms_is_off():
+    spa = FakeSpa()
+    async with app_for(spa) as client:
+        assert (await client.get("/api/alerts")).json() == {"enabled": False}
+
+
 async def test_pause_toggle_round_trip():
     spa = FakeSpa()
     async with app_for(spa) as client:

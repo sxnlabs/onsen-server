@@ -22,31 +22,42 @@ import asyncio
 import datetime as _dt
 import hashlib
 import json as _json
+import logging
 import os
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
 from intex_spa import camera as cam_mod
 from intex_spa import protocol
+from intex_spa.alerts import AlertConfig, AlertMonitor
 from intex_spa.client import SpaUnreachable
 from intex_spa.command_log import CommandLog
 from intex_spa.concurrency import configure_io_threads, reset_io_threads, run_blocking
 from intex_spa.history import TempHistory
 from intex_spa import schedule as sched_mod
 from intex_spa.scheduler import Scheduler
+from intex_spa.sms import OvhCredentials, SmsSender
 from intex_spa.supervisor import Supervisor
 from intex_spa.weather import DEFAULT_LAT, DEFAULT_LON, WeatherClient
 
 from . import auth, i18n
 
 _BASE = Path(__file__).parent
+_ALERT_LOG = logging.getLogger("intex_spa.alerts")
 templates = Jinja2Templates(directory=str(_BASE / "templates"))
 
 
@@ -283,6 +294,10 @@ def create_app(
     manual_override_path: str | None = "state/manual_overrides.json",
     pause_path: str | None = "state/pause.json",
     automation_cooldown_path: str | None = "state/automation_cooldowns.json",
+    alert_sender: object | None = None,
+    alert_config: AlertConfig | None = None,
+    alert_state_path: str | None = "state/alerts.json",
+    alert_interval: float = 60.0,
     login_limiter: auth.GlobalRateLimiter | None = None,
     io_threads: int | None = 8,
 ) -> FastAPI:
@@ -334,6 +349,22 @@ def create_app(
     else:
         camera = None
 
+    # -- alerting (opt-in, same pattern as camera/weather) ---------------
+    # No sender configured → no monitor at all, rather than a monitor that
+    # evaluates conditions it can't report. `alert_sender` is injectable so the
+    # tests exercise the rules without OVH credentials.
+    alerts = (
+        AlertMonitor(
+            supervisor,
+            alert_sender,
+            config=alert_config,
+            state_path=alert_state_path,
+            interval=alert_interval,
+        )
+        if alert_sender is not None
+        else None
+    )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         configure_io_threads(io_threads)
@@ -347,8 +378,12 @@ def create_app(
             await scheduler.start()
             if camera is not None:
                 await camera.start()
+            if alerts is not None:
+                await alerts.start()
             yield
         finally:
+            if alerts is not None:
+                await alerts.stop()
             if weather_warmup is not None:
                 weather_warmup.cancel()
                 with suppress(asyncio.CancelledError):
@@ -363,6 +398,7 @@ def create_app(
     app.state.supervisor = supervisor
     app.state.scheduler = scheduler
     app.state.weather = weather
+    app.state.alerts = alerts
     app.state.camera = camera
     app.state.camera_config = camera_config
     app.state.camera_config_path = camera_config_path
@@ -373,7 +409,11 @@ def create_app(
         @app.middleware("http")
         async def _gate(request: Request, call_next):
             path = request.url.path
-            public = path == "/login" or path.startswith("/static/") or path == "/healthz"
+            public = (
+                path == "/login"
+                or path.startswith("/static/")
+                or path in ("/healthz", "/spa-healthz")
+            )
             if not public and not auth.token_valid(request.cookies.get(auth.COOKIE_NAME), secret):
                 if request.method == "GET":
                     return RedirectResponse("/login", status_code=303)
@@ -652,6 +692,33 @@ def create_app(
             "paused": supervisor.paused,
         }
 
+    @app.get("/spa-healthz")
+    async def spa_healthz():
+        """Liveness of the *spa link*, not of this process.
+
+        `/healthz` is the container's healthcheck and must stay 200 while the
+        app itself is fine — during the 46h outage of 2026-08-22 it did exactly
+        that, which is why nothing external noticed. This endpoint is the one an
+        outside monitor should watch: 503 as soon as the spa stops answering.
+        Same public-endpoint discipline: a coarse boolean, never the error text.
+        """
+        stale = supervisor.last_ok_at is None or (
+            time.time() - supervisor.last_ok_at > max(60.0, poll_interval * 6)
+        )
+        payload = {
+            "online": supervisor.state["online"],
+            "last_ok_at": supervisor.last_ok_at,
+            "paused": supervisor.paused,
+        }
+        return JSONResponse(payload, status_code=503 if stale else 200)
+
+    @app.get("/api/alerts")
+    async def api_alerts():
+        """What the watchdog is watching, and what it has already texted about."""
+        if alerts is None:
+            return {"enabled": False}
+        return {"enabled": True, **alerts.snapshot()}
+
     @app.get("/api/resume-preview")
     async def api_resume_preview():
         return await scheduler.resume_preview()
@@ -795,11 +862,37 @@ def _configured_io_threads() -> int:
     return max(1, value)
 
 
+def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
+    """Build the SMS sender from the environment, or None when not configured.
+
+    Half-configured is the dangerous state — a phone number with no OVH keys
+    looks like alerting is on and texts nothing — so it's logged loudly rather
+    than degrading in silence.
+    """
+    recipient = (os.environ.get("ONSEN_SMS_TO") or "").strip()
+    credentials = OvhCredentials.from_env()
+    if bool(recipient) != bool(credentials):
+        _ALERT_LOG.error(
+            "SMS alerting is half-configured (%s) — no alert will be sent",
+            "ONSEN_SMS_TO set, OVH_* missing" if recipient else "OVH_* set, ONSEN_SMS_TO missing",
+        )
+    sender = SmsSender(credentials, recipient) if (recipient and credentials) else None
+
+    floor = (os.environ.get("ONSEN_ALERT_WATER_LOW_C") or "").strip().lower()
+    config = AlertConfig(
+        unreachable_after=float(os.environ.get("ONSEN_ALERT_UNREACHABLE_AFTER", "3600")),
+        water_low_c=None if floor in ("off", "none", "0") else float(floor or 30.0),
+        heating_stall_hours=float(os.environ.get("ONSEN_ALERT_HEATING_STALL_HOURS", "2")),
+    )
+    return sender, config
+
+
 def make_app() -> FastAPI:
     """uvicorn --factory entry point. Reads config from the environment."""
     host = os.environ.get("INTEX_SPA_HOST")
     if not host:
         raise RuntimeError("INTEX_SPA_HOST is required (the spa wifi module IP on your LAN)")
+    alert_sender, alert_config = _configured_alerting()
     return create_app(
         host,
         port=int(os.environ.get("INTEX_SPA_PORT", protocol.PORT)),
@@ -808,5 +901,7 @@ def make_app() -> FastAPI:
         weather_enabled=os.environ.get("WEATHER_ENABLED", "1") not in ("0", "false", "no", ""),
         weather_lat=float(os.environ.get("WEATHER_LAT", DEFAULT_LAT)),
         weather_lon=float(os.environ.get("WEATHER_LON", DEFAULT_LON)),
+        alert_sender=alert_sender,
+        alert_config=alert_config,
         io_threads=_configured_io_threads(),
     )
