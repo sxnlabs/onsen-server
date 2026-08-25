@@ -143,6 +143,17 @@ docker compose exec onsen /app/.venv/bin/python sms_probe.py --dry-run   # resol
 Exit codes: 0 sent, 1 not configured (it names which half is missing), 2 refused
 by OVH. On the LaunchAgent path it's `uv run python sms_probe.py` from the repo.
 
+**`sent` means OVH accepted the job, not that a phone rang.** The API's `ptt`
+delivery code stays `0` whatever happens — even for a number that doesn't exist —
+so it can't be used as proof either. And an alphanumeric sender like `SXNLABS`
+has no entry in the address book, so iOS files it under Filters → Unknown
+Senders and never notifies: on 2026-08-25 three test messages arrived, were
+read back from the OVH outgoing log, and sat unseen in that tab. The test is
+only finished when the message is seen **on the device**, in a thread that
+notifies. If it lands in the filtered tab, the alert is not an alert — turn the
+filter off for this sender, or send from a numeric sender (`senderForResponse`)
+which lands in an ordinary thread.
+
 **The rules** — `evaluate()`, the debounce, the persisted episode, the resolution
 SMS. None of that is exercised above. To rehearse it end to end without touching
 the hardware, point the app at an address that doesn't answer:
