@@ -126,25 +126,36 @@ def evaluate(
         )
         firing[ERROR_CODE] = f"Onsen: le spa signale l'erreur {code}.{water}"
 
-    # The live frame outranks the window: `TempHistory.record()` drops a
-    # heater-off observation when the temperature hasn't moved and the last
-    # point is under a minute old, so the window can still read all-heat after
-    # the heater actually stopped.
+    current = status.get("current_temp")
+    preset = status.get("preset_temp")
+
+    # A stall is only a stall on a frame that is both readable and still asking
+    # for heat. The live frame outranks the window on all three counts:
+    # `TempHistory.record()` used to drop a heater-off observation inside the
+    # throttle; an error frame carries no reading at all (and would format "eau
+    # NoneC" off pre-fault samples); and a setpoint lowered mid-window means the
+    # thermostat is right to stop climbing — "eau 30C, consigne 30C" is not a
+    # fault, it's an arrival.
+    heating_requested = (
+        status.get("heater")
+        and not code
+        and current is not None
+        and preset is not None
+        and preset > current
+    )
     stall = (
         _heating_stalled(samples=samples, config=config, now=now)
-        if status.get("heater")
+        if heating_requested
         else None
     )
     if stall is not None:
         rise, hours = stall
         firing[HEATING_STALLED] = (
             f"Onsen: chauffe active depuis {hours:g}h pour +{rise:g}C seulement "
-            f"(eau {status.get('current_temp')}C, consigne {status.get('preset_temp')}C). "
+            f"(eau {current}C, consigne {preset}C). "
             "Resistance ou couvercle ?"
         )
 
-    current = status.get("current_temp")
-    preset = status.get("preset_temp")
     if (
         config.water_low_c is not None
         and current is not None
@@ -199,11 +210,18 @@ def _heating_stalled(
 # write every ten minutes, not one per tick.
 WITNESS_INTERVAL = 600.0
 
+# Only say what was actually observed. An episode stops firing for more reasons
+# than the happy one: a stall clears when the heater is switched off or the
+# window goes inconclusive, and a water-low clears when the setpoint is lowered
+# under water that is still cold. "La chauffe repart" would then be the opposite
+# of the truth, so those two get a neutral label and let the reading that
+# follows speak. The other two *are* the observation: an online frame, and an
+# online frame with no error code.
 _RESOLVED = {
     UNREACHABLE: "spa de nouveau joignable",
-    ERROR_CODE: "erreur disparue",
-    HEATING_STALLED: "la chauffe repart",
-    WATER_LOW: "temperature revenue au-dessus du seuil",
+    ERROR_CODE: "plus d'erreur signalee",
+    HEATING_STALLED: "alerte chauffe levee",
+    WATER_LOW: "alerte eau basse levee",
 }
 
 
@@ -299,6 +317,18 @@ class AlertMonitor:
                 changed = True
             elif episode.pop("cleared_at", None) is not None:
                 changed = True  # it came back before we could announce it was over
+            if key == ERROR_CODE:
+                # A different fault is a different alert. Without this, a spa
+                # going straight from E90 to E94 reuses the notified episode and
+                # the new (possibly worse) diagnosis is never sent — it would
+                # wait for an error-free frame to close the first one.
+                code = (status or {}).get("error_code")
+                if episode.get("code") not in (None, code):
+                    episode.update(since=now, notified_at=None, code=code)
+                    changed = True
+                elif episode.get("code") != code:
+                    episode["code"] = code
+                    changed = True
             if episode["notified_at"] is None and now - episode["since"] >= self.config.delay_for(key):
                 # A failed send leaves notified_at None: the next tick retries
                 # rather than losing the alert to a transient OVH error.

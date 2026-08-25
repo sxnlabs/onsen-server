@@ -11,6 +11,7 @@ from intex_spa.alerts import (
     WATER_LOW,
     AlertConfig,
     AlertMonitor,
+    resolution_message,
     evaluate,
 )
 from intex_spa.history import TempHistory
@@ -273,7 +274,7 @@ async def test_offline_does_not_resolve_a_spa_side_episode(tmp_path):
     watchdog.supervisor.last_ok_at = NOW + 120
     await watchdog.tick(now=NOW + 120)
     assert len(sender.sent) == 2
-    assert "erreur disparue" in sender.sent[1]
+    assert "plus d'erreur" in sender.sent[1]
 
 
 async def test_resolution_sms_is_retried_until_it_lands(tmp_path):
@@ -424,3 +425,53 @@ async def test_an_interrupted_debounce_starts_over(tmp_path):
     assert sender.sent == []
     await watchdog.tick(now=NOW + 6 * 3600 + 900)
     assert len(sender.sent) == 1 and "seuil" in sender.sent[0]
+
+
+async def test_a_different_fault_is_a_different_alert(tmp_path):
+    """E90 straight to E94 must not hide behind the already-notified episode."""
+    sender = FakeSender()
+    status = dict(OK, error_code="E90")
+    watchdog = monitor(
+        tmp_path, sender, online=True, status=status, last_ok_at=NOW,
+        config=AlertConfig(error_code_after=0),
+    )
+    await watchdog.tick(now=NOW)
+    assert len(sender.sent) == 1 and "E90" in sender.sent[0]
+
+    await watchdog.tick(now=NOW + 60)
+    assert len(sender.sent) == 1  # same fault, still one text
+
+    watchdog.supervisor.state["status"] = dict(OK, error_code="E94")
+    await watchdog.tick(now=NOW + 120)
+    assert len(sender.sent) == 2 and "E94" in sender.sent[1]
+
+
+def test_a_setpoint_lowered_mid_window_is_not_a_stall():
+    """"eau 30C, consigne 30C" is an arrival, not a fault."""
+    arrived = {"current_temp": 30, "preset_temp": 30, "heater": True, "error_code": None}
+    firing = evaluate(
+        online=True, status=arrived, last_ok_at=NOW,
+        samples=heating_samples(hours=2, rise=0), config=AlertConfig(), now=NOW,
+    )
+    assert HEATING_STALLED not in firing
+
+
+def test_an_error_frame_never_produces_a_stall_alert():
+    """An online error frame keeps heater=True but has no reading: judging the
+    pre-fault window would text a diagnosis containing "eau NoneC"."""
+    faulty = {"current_temp": None, "preset_temp": 38, "heater": True, "error_code": "E90"}
+    firing = evaluate(
+        online=True, status=faulty, last_ok_at=NOW,
+        samples=heating_samples(hours=2, rise=0), config=AlertConfig(), now=NOW,
+    )
+    assert HEATING_STALLED not in firing
+    assert set(firing) == {ERROR_CODE}
+
+
+def test_resolution_wording_claims_only_what_was_observed():
+    """A stall episode also clears when the heater is switched off, and a
+    water-low one when the setpoint is lowered under still-cold water."""
+    cooled = {"current_temp": 28, "preset_temp": 27, "heater": False, "error_code": None}
+    assert "repart" not in resolution_message(HEATING_STALLED, cooled)
+    assert "au-dessus" not in resolution_message(WATER_LOW, cooled)
+    assert "28C" in resolution_message(WATER_LOW, cooled)
