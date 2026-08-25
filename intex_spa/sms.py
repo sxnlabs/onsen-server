@@ -28,6 +28,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from .concurrency import run_blocking
 from .errors import describe
@@ -36,6 +37,34 @@ _LOG = logging.getLogger("intex_spa.sms")
 
 BASE_URL = "https://eu.api.ovh.com/1.0"
 MAX_LEN = 160  # one GSM-7 part; past this OVH bills (and sends) several SMS
+
+
+def alerting_env(state_path: str | Path = "state/.sms") -> dict:
+    """Alerting settings: `state/.sms` (key=value), overridden by the real env.
+
+    launchd carries no environment of its own, so on the LaunchAgent path
+    anything not baked into the plist is lost — and these are credentials, which
+    belong in a 0600 file rather than a world-readable plist. Same split as the
+    UI password (`state/.password`, written by install.sh, kept out of the plist).
+    """
+    values: dict[str, str] = {}
+    path = Path(state_path)
+    if path.exists():
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            _LOG.warning("failed to read %s", state_path, exc_info=True)
+            lines = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    # Not `if v`: an explicitly empty ONSEN_SMS_TO is how alerting is turned off,
+    # and dropping empty overrides would leave a stale state/.sms texting on.
+    values.update(os.environ)
+    return values
 
 
 @dataclass(frozen=True)

@@ -27,6 +27,11 @@ uv run pytest tests/test_schedule.py::test_ready_by_leads_in -q
 python3 probe.py <spa-ip>
 python3 probe.py --selftest
 
+# send one real SMS to check the alert path is armed (no socket to the spa,
+# so it's safe against a live instance). --dry-run resolves the config only.
+uv run python sms_probe.py
+docker compose exec onsen /app/.venv/bin/python sms_probe.py   # remote deployment
+
 # install as a LaunchAgent (com.sxnlabs.spa)
 INTEX_SPA_HOST=<spa-ip> ./install.sh
 ```
@@ -77,7 +82,8 @@ intex_spa/supervisor.py  owns the client; poll loop; SSE fanout; history record 
 intex_spa/history.py     JSONL temp samples, throttled (new point on a temp *or relay* change, or ≥60s), 7-day retention
 intex_spa/weather.py     Open-Meteo client, in-memory + state/weather.json cache (30 min TTL), fail-soft
 intex_spa/alerts.py      pure evaluate() (unreachable / error code / stalled heat / water floor) + AlertMonitor loop
-intex_spa/sms.py         OVH SMS sender (stdlib urllib, v1 signature), opt-in, never raises
+intex_spa/sms.py         OVH SMS sender (stdlib urllib, v1 signature), opt-in, never raises; alerting_env() resolves env over state/.sms
+sms_probe.py             one-shot "is the alert path armed?" — transport only, never touches the spa
 intex_spa/errors.py      describe(exc) — never-empty one-liner for exceptions whose str() is ""
 intex_spa/schedule.py    config validation + pure evaluate() + effective_heat_rate() calibration
 intex_spa/scheduler.py   async reconciler, manual-override tracking, weather-aware heat-rate sizing

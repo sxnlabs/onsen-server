@@ -50,7 +50,7 @@ from intex_spa.concurrency import configure_io_threads, reset_io_threads, run_bl
 from intex_spa.history import TempHistory
 from intex_spa import schedule as sched_mod
 from intex_spa.scheduler import Scheduler
-from intex_spa.sms import OvhCredentials, SmsSender
+from intex_spa.sms import OvhCredentials, SmsSender, alerting_env
 from intex_spa.supervisor import Supervisor
 from intex_spa.weather import DEFAULT_LAT, DEFAULT_LON, WeatherClient
 
@@ -862,34 +862,6 @@ def _configured_io_threads() -> int:
     return max(1, value)
 
 
-def _alerting_env(state_path: str = "state/.sms") -> dict:
-    """Alerting settings: `state/.sms` (key=value), overridden by the real env.
-
-    launchd carries no environment of its own, so on the LaunchAgent path
-    anything not baked into the plist is lost — and these are credentials, which
-    belong in a 0600 file rather than a world-readable plist. Same split as the
-    UI password (`state/.password`, written by install.sh, kept out of the plist).
-    """
-    values: dict[str, str] = {}
-    path = Path(state_path)
-    if path.exists():
-        try:
-            lines = path.read_text().splitlines()
-        except OSError:
-            _ALERT_LOG.warning("failed to read %s", state_path, exc_info=True)
-            lines = []
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            values[key.strip()] = value.strip().strip('"').strip("'")
-    # Not `if v`: an explicitly empty ONSEN_SMS_TO is how alerting is turned off,
-    # and dropping empty overrides would leave a stale state/.sms texting on.
-    values.update(os.environ)
-    return values
-
-
 def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
     """Build the SMS sender from the environment, or None when not configured.
 
@@ -897,7 +869,7 @@ def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
     looks like alerting is on and texts nothing — so it's logged loudly rather
     than degrading in silence.
     """
-    env = _alerting_env()
+    env = alerting_env()
     recipient = (env.get("ONSEN_SMS_TO") or "").strip()
     credentials = OvhCredentials.from_env(env)
     if bool(recipient) != bool(credentials):

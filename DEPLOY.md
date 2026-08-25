@@ -126,6 +126,41 @@ curl -s -b "$JAR" http://127.0.0.1:8731/api/alerts; rm -f "$JAR"
 docker compose logs onsen | grep -i "half-configured"   # any hit = armed in name only
 ```
 
+### Prod smoke test
+
+Two levels, and they don't prove the same thing.
+
+**The transport** — credentials, signature, clock, recipient, credits. One SMS,
+30 seconds, no socket to the spa (safe while the supervisor holds its one TCP
+connection):
+
+```bash
+docker compose exec onsen /app/.venv/bin/python sms_probe.py
+# recipient: ...8237 / service: sms-xxxxxxx-1 / sender: SXNLABS / sent
+docker compose exec onsen /app/.venv/bin/python sms_probe.py --dry-run   # resolve config, spend nothing
+```
+
+Exit codes: 0 sent, 1 not configured (it names which half is missing), 2 refused
+by OVH. On the LaunchAgent path it's `uv run python sms_probe.py` from the repo.
+
+**The rules** — `evaluate()`, the debounce, the persisted episode, the resolution
+SMS. None of that is exercised above. To rehearse it end to end without touching
+the hardware, point the app at an address that doesn't answer:
+
+```bash
+cp .env .env.test-backup
+sed -i 's/^INTEX_SPA_HOST=.*/INTEX_SPA_HOST=192.168.20.254/' .env   # dead IP on the IoT VLAN
+echo 'ONSEN_ALERT_UNREACHABLE_AFTER=60' >> .env
+docker compose up -d
+#   ~2 min later: "spa injoignable depuis 1 min…"
+mv .env.test-backup .env && docker compose up -d
+#   next tick: "spa de nouveau joignable"
+```
+
+The spa goes unmanaged for those two minutes, which is harmless. Don't test by
+swapping `ONSEN_SMS_TO` for another number — OVH refuses an unknown receiver, so
+you'd be exercising the failure path, not the nominal one.
+
 What earns a text, one per episode plus one when it clears:
 
 | Condition | Fires after |

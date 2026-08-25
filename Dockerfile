@@ -45,7 +45,7 @@ COPY --from=builder /app/.venv /app/.venv
 # so it lives next to the venv rather than being installed into it.
 COPY intex_spa ./intex_spa
 COPY web ./web
-COPY probe.py ./
+COPY probe.py sms_probe.py ./
 RUN mkdir -p /app/state
 
 EXPOSE 8731

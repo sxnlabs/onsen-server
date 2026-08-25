@@ -77,7 +77,7 @@ def test_describe_never_returns_an_empty_string():
 
 def test_alerting_env_reads_the_state_file_and_the_env_wins(tmp_path, monkeypatch):
     """launchd carries no env: state/.sms is where the LaunchAgent path finds these."""
-    from web.main import _alerting_env
+    from intex_spa.sms import alerting_env as _alerting_env
 
     state = tmp_path / ".sms"
     state.write_text(
@@ -96,7 +96,7 @@ def test_alerting_env_reads_the_state_file_and_the_env_wins(tmp_path, monkeypatc
 
 
 def test_alerting_env_is_empty_without_a_state_file(tmp_path, monkeypatch):
-    from web.main import _alerting_env
+    from intex_spa.sms import alerting_env as _alerting_env
 
     for name in (*ENV, "ONSEN_SMS_TO"):
         monkeypatch.delenv(name, raising=False)
@@ -106,7 +106,7 @@ def test_alerting_env_is_empty_without_a_state_file(tmp_path, monkeypatch):
 def test_an_empty_env_value_disables_a_persisted_recipient(tmp_path, monkeypatch):
     """`ONSEN_SMS_TO=` is the documented off switch — a stale state/.sms must not
     keep texting through it."""
-    from web.main import _alerting_env
+    from intex_spa.sms import alerting_env as _alerting_env
 
     state = tmp_path / ".sms"
     state.write_text("ONSEN_SMS_TO=+33600000000\n")
