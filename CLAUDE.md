@@ -74,7 +74,7 @@ The spa accepts only ONE TCP client, so the LaunchAgent and the container must n
 intex_spa/protocol.py    pure encode/decode (no I/O, no deps) — checksum is mod 0xFF, not 0x100
 intex_spa/client.py      one async TCP socket + lock + retries
 intex_spa/supervisor.py  owns the client; poll loop; SSE fanout; history record on each refresh
-intex_spa/history.py     JSONL temp samples, throttled (new point on change or ≥60s), 7-day retention
+intex_spa/history.py     JSONL temp samples, throttled (new point on a temp *or relay* change, or ≥60s), 7-day retention
 intex_spa/weather.py     Open-Meteo client, in-memory + state/weather.json cache (30 min TTL), fail-soft
 intex_spa/alerts.py      pure evaluate() (unreachable / error code / stalled heat / water floor) + AlertMonitor loop
 intex_spa/sms.py         OVH SMS sender (stdlib urllib, v1 signature), opt-in, never raises

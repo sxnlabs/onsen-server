@@ -23,6 +23,18 @@ def test_records_when_temp_changes_even_if_fast():
     assert len(h.recent(now=1005)) == 2
 
 
+def test_records_when_a_relay_flips_even_if_fast():
+    """A heater cycling off and on inside the throttle window has to leave a
+    trace: the chart draws bands from these points, and the stall watchdog reads
+    an all-heat window as continuous heating."""
+    h = TempHistory(path=None, min_interval=60)
+    h.record(19, 37, True, ts=1000, filter_on=True)
+    assert h.record(19, 37, False, ts=1010, filter_on=True) is not None   # heater off
+    assert h.record(19, 37, False, ts=1020, filter_on=False) is not None  # filter off
+    assert h.record(19, 37, False, ts=1030, filter_on=False) is None      # nothing moved
+    assert len(h.recent(now=1030)) == 3
+
+
 def test_records_after_interval_even_if_unchanged():
     h = TempHistory(path=None, min_interval=60)
     h.record(19, 37, False, ts=1000)

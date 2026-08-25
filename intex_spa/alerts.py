@@ -306,18 +306,26 @@ class AlertMonitor:
                     episode["notified_at"] = now
                     changed = True
 
-        # Nothing is announced as over while the spa is unreachable. For a
-        # spa-side rule `evaluate()` deliberately says nothing, and reading that
-        # silence as recovery would text "erreur disparue" off a stale frame,
-        # right after an E90. And an outage that reconnects, fails to send its
-        # resolution, then drops again below the threshold is not "de nouveau
-        # joignable" either — it just isn't firing yet.
-        for key in [k for k in self._episodes if k not in firing] if online else []:
+        for key in [k for k in self._episodes if k not in firing]:
             episode = self._episodes[key]
-            changed = True
             if episode.get("notified_at") is None:
+                # Nothing was ever said, so there is nothing to take back — and
+                # an interrupted debounce is not a debounce: a water-low
+                # condition seen for five minutes before the link died has not
+                # persisted fifteen. If it's still there when the spa comes
+                # back, its clock starts again.
                 self._episodes.pop(key)
+                changed = True
                 continue
+            # Nothing is announced as over while the spa is unreachable. For a
+            # spa-side rule `evaluate()` deliberately says nothing, and reading
+            # that silence as recovery would text "erreur disparue" off a stale
+            # frame, right after an E90. And an outage that reconnects, fails to
+            # send its resolution, then drops again below the threshold is not
+            # "de nouveau joignable" either — it just isn't firing yet.
+            if not online:
+                continue
+            changed = True
             # Owe a resolution SMS: keep the episode until it actually goes out,
             # same retry contract as the opening alert.
             episode.setdefault("cleared_at", now)

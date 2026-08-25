@@ -402,3 +402,25 @@ async def test_an_error_frame_still_dates_the_outage_after_a_restart(tmp_path):
 
     await restarted.tick(now=NOW + 3700)
     assert len(sender.sent) == 1
+
+
+async def test_an_interrupted_debounce_starts_over(tmp_path):
+    """Water low for 5 of the 15 required minutes, then the link dies for hours:
+    when it comes back the condition has not persisted — the clock restarts."""
+    sender = FakeSender()
+    cold = {"current_temp": 28, "preset_temp": 37, "heater": True, "error_code": None}
+    watchdog = monitor(tmp_path, sender, online=True, status=cold, last_ok_at=NOW)
+    await watchdog.tick(now=NOW)
+    assert watchdog.snapshot()["episodes"][WATER_LOW]["notified"] is False
+
+    watchdog.supervisor.state["online"] = False
+    await watchdog.tick(now=NOW + 300)
+    assert WATER_LOW not in watchdog.snapshot()["episodes"]
+
+    # Six hours later the spa is back, still cold: a fresh 15-minute clock.
+    watchdog.supervisor.state["online"] = True
+    watchdog.supervisor.last_ok_at = NOW + 6 * 3600
+    await watchdog.tick(now=NOW + 6 * 3600)
+    assert sender.sent == []
+    await watchdog.tick(now=NOW + 6 * 3600 + 900)
+    assert len(sender.sent) == 1 and "seuil" in sender.sent[0]

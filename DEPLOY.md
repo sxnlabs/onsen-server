@@ -112,9 +112,18 @@ OVH_SMS_SERVICE=sms-xxxxxxx-1
 
 Then `docker compose up -d` and confirm it's armed:
 
+`/api/alerts` sits behind the UI password, so it needs a login cookie — an
+unauthenticated `curl` gets a 303 to `/login`, which `curl -f` does **not** treat
+as a failure and which would look like a pass:
+
 ```bash
-curl -fsS http://127.0.0.1:8731/api/alerts     # {"enabled": true, "config": {...}, "episodes": {}}
-docker compose logs onsen | grep -i sms        # an error here = half-configured
+JAR=$(mktemp)
+curl -s -c "$JAR" -o /dev/null -X POST http://127.0.0.1:8731/login \
+  --data-urlencode "password=$(grep '^HERMES_PASSWORD=' .env | cut -d= -f2-)"
+curl -s -b "$JAR" http://127.0.0.1:8731/api/alerts; rm -f "$JAR"
+# {"enabled":true,"config":{...},"episodes":{}}   <- enabled:true means recipient AND OVH keys are present
+
+docker compose logs onsen | grep -i "half-configured"   # any hit = armed in name only
 ```
 
 What earns a text, one per episode plus one when it clears:
