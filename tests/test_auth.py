@@ -61,6 +61,8 @@ async def test_login_page_and_public_paths(tmp_path):
     async with auth_client(spa, tmp_path) as client:
         assert (await client.get("/login")).status_code == 200
         assert (await client.get("/healthz")).status_code == 200
+        # An outside monitor must reach this one without a cookie.
+        assert (await client.get("/spa-healthz")).status_code in (200, 503)
         assert (await client.get("/static/app.css")).status_code == 200
 
 

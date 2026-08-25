@@ -52,7 +52,16 @@ class TempHistory:
         ts = time.time() if ts is None else ts
         if self._pts:
             last = self._pts[-1]
-            if (ts - last["t"]) < self.min_interval and last["cur"] == current_temp:
+            # A relay flip is a change, like a temperature is: throttling on the
+            # temperature alone drops a heater that goes off and back on inside
+            # the same minute. That loses the band on the chart, and it lets the
+            # stall watchdog read an all-heat window across a cycle that stopped.
+            unchanged = (
+                last["cur"] == current_temp
+                and last.get("heat") == bool(heater)
+                and (filter_on is None or last.get("filter") == bool(filter_on))
+            )
+            if (ts - last["t"]) < self.min_interval and unchanged:
                 return None
         pt = {
             "t": round(float(ts), 1),

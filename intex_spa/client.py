@@ -15,6 +15,7 @@ import logging
 from collections.abc import Callable
 
 from . import protocol
+from .errors import describe
 
 _LOG = logging.getLogger("intex_spa.client")
 
@@ -116,11 +117,12 @@ class IntexSpaClient:
                 # oversized/garbled frame with no newline. Treat it as a network
                 # error (tear down + retry) instead of letting it escape raw.
                 last_exc = e
-                _LOG.warning("network error (attempt %d): %s", attempt + 1, e)
+                _LOG.warning("network error (attempt %d): %s", attempt + 1, describe(e))
                 await self._disconnect()
                 if idempotent:
                     await asyncio.sleep(0.5)
-        raise SpaUnreachable(f"{intent} failed after {attempts} attempts: {last_exc}")
+        detail = describe(last_exc) if last_exc is not None else "no attempt made"
+        raise SpaUnreachable(f"{intent} failed after {attempts} attempts: {detail}")
 
     async def _toggle_to(self, field: str, desired: bool, st: dict) -> dict:
         """Drive a toggle field to `desired`, safely over a flaky link.

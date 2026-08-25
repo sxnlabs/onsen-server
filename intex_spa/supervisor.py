@@ -45,6 +45,10 @@ class Supervisor:
         # reads are the safety feed and keepalive. User-initiated set_field /
         # set_preset still go through (explicit intent).
         self.paused: bool = self._load_paused()
+        # Last time the spa actually answered — `state["updated_at"]` moves on
+        # every poll, failures included, so it can't date an outage. The alert
+        # monitor reads this to know how long we've been in the dark.
+        self.last_ok_at: float | None = None
         self.state: dict = {
             "status": None,      # last decoded status dict, or None until first read
             "online": False,
@@ -93,6 +97,8 @@ class Supervisor:
     def _set_state(self, *, online: bool, error: str | None, status: dict | None = None) -> None:
         # keep the last known status on error so the UI can show a stale-but-useful view
         kept = status if status is not None else self.state.get("status")
+        if online:
+            self.last_ok_at = time.time()
         self.state = {
             "status": kept,
             "online": online,
