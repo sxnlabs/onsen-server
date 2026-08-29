@@ -195,7 +195,26 @@ What earns a text, one per episode plus one when it clears:
 | Spa unreachable (spa, tunnel or host) | 1 h of silence — `ONSEN_ALERT_UNREACHABLE_AFTER` |
 | The spa reports an error code (E90…) | 5 min |
 | Heater on ≥2 h without gaining 1 °C | the window itself — `ONSEN_ALERT_HEATING_STALL_HOURS` |
-| Water at/below 30 °C with a higher setpoint | 15 min — `ONSEN_ALERT_WATER_LOW_C`, `off` to disable |
+
+Faults only — an SMS costs money, so it has to mean something is broken. A water
+floor (“water at/below N °C while the setpoint is higher”) is available but
+**off unless you set `ONSEN_ALERT_WATER_LOW_C`**: a spa climbing from 29 °C to
+its 37 °C setpoint is a normal cold start, and alerting on every one of them
+buried the three rules above. Set it to a temperature (`5`, say) if you want a
+freeze warning; it fires after 15 min and clears like the others.
+
+**Upgrading from a version that had the floor on?** Unset is what means off, so
+an install that never named the variable goes quiet by itself — but one that
+*does* still carry `ONSEN_ALERT_WATER_LOW_C=30` (the value the old docs printed
+as the default) keeps texting every cold start. Delete that line from `.env`, or
+from `state/.sms` on the LaunchAgent path, where `install.sh` may have written it
+and where a reinstall leaves the existing file untouched.
+
+Each rule's variable also accepts `off` (or `none`, or `0`) to switch it off —
+`ONSEN_ALERT_HEATING_STALL_HOURS=off` retires the stall check. The outage alarm
+has no off switch: it's the one this whole module was written for. A value that
+isn't a number is logged and ignored rather than raised — an alerting typo must
+not be what stops the spa from being driven.
 
 On the **LaunchAgent** path there is no `.env` and launchd carries no environment
 of its own, so `install.sh` writes the same settings to `state/.sms` (0600, kept

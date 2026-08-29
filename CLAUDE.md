@@ -81,7 +81,7 @@ intex_spa/client.py      one async TCP socket + lock + retries
 intex_spa/supervisor.py  owns the client; poll loop; SSE fanout; history record on each refresh
 intex_spa/history.py     JSONL temp samples, throttled (new point on a temp *or relay* change, or ≥60s), 7-day retention
 intex_spa/weather.py     Open-Meteo client, in-memory + state/weather.json cache (30 min TTL), fail-soft
-intex_spa/alerts.py      pure evaluate() (unreachable / error code / stalled heat / water floor) + AlertMonitor loop
+intex_spa/alerts.py      pure evaluate() (unreachable / error code / stalled heat; opt-in water floor) + AlertMonitor loop
 intex_spa/sms.py         OVH SMS sender (stdlib urllib, v1 signature), opt-in, never raises; alerting_env() resolves env over state/.sms
 sms_probe.py             one-shot "is the alert path armed?" — transport only, never touches the spa
 intex_spa/errors.py      describe(exc) — never-empty one-liner for exceptions whose str() is ""
