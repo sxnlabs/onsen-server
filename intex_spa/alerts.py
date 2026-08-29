@@ -31,6 +31,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from intex_spa.errors import describe
+
 _LOG = logging.getLogger("intex_spa.alerts")
 
 UNREACHABLE = "unreachable"
@@ -233,6 +235,54 @@ def resolution_message(key: str, status: dict | None) -> str:
     return f"Onsen: {label}.{water}"
 
 
+# Failed ticks before the log stops calling it non-fatal. Five is five minutes at
+# the default interval — long enough to ride out a transient, short enough that a
+# broken watchdog is named while the spa is still warm.
+FAILURE_ALARM_AFTER = 5
+
+# Clean ticks before a streak is declared over. Clearing on the *first* good tick
+# would hide the failure that comes and goes: a bug reached only while some
+# condition is firing — a flickering E90 — breaks one tick in two, so the count
+# would never reach the alarm and `/api/alerts` would read healthy in between.
+RECOVERY_TICKS = 5
+
+
+def _episode_from(value: object) -> dict | None:
+    """One persisted episode, normalised — or None when it isn't one.
+
+    `tick()` reads `episode["notified_at"]` unguarded, and that is the right
+    shape for it: an episode without that key is not a half-known episode, it's
+    an unreadable file. But a file written by an older version, truncated, or
+    edited by hand used to reach the tick anyway and raise `KeyError` there —
+    and `_loop` logged that as non-fatal, every 60 seconds, forever. The
+    watchdog was dead and the only trace was a line nobody reads, which is
+    exactly the failure this module was written to end.
+
+    So the trust boundary is here: whatever comes off disk is either turned into
+    a complete episode or dropped.
+    """
+    if not isinstance(value, dict):
+        return None
+    since = _stamp(value.get("since"))
+    if since is None:
+        return None
+    episode: dict = {"since": since, "notified_at": _stamp(value.get("notified_at"))}
+    cleared_at = _stamp(value.get("cleared_at"))
+    if cleared_at is not None:
+        episode["cleared_at"] = cleared_at
+    if isinstance(value.get("code"), str):
+        episode["code"] = value["code"]
+    return episode
+
+
+def _stamp(value: object) -> float | None:
+    """A JSON number as an epoch, or None. `True` is an `int` and would date an
+    episode to January 1970 — a 56-year outage in the SMS."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 class AlertMonitor:
     """Debounces `evaluate()`, texts once per episode, texts again on clear.
 
@@ -257,6 +307,11 @@ class AlertMonitor:
         self.interval = interval
         self.started_at = time.time()
         self._episodes, self._last_ok_witness = self._load()
+        self._failures = 0
+        self._clean_ticks = 0
+        self._failure_since: float | None = None
+        self._failure_error: str | None = None
+        self._last_tick_at: float | None = None
         self._task: asyncio.Task | None = None
 
     # -- lifecycle ------------------------------------------------------------
@@ -279,8 +334,60 @@ class AlertMonitor:
             await asyncio.sleep(self.interval)
             try:
                 await self.tick()
-            except Exception:  # noqa: BLE001 — alerting must never kill itself
-                _LOG.exception("alert tick failed (non-fatal)")
+            except Exception as exc:  # noqa: BLE001 — alerting must never kill itself
+                self._note_failure(exc)
+            else:
+                self._note_success()
+            finally:
+                # Proof of life, whatever the outcome. `failing: null` alone
+                # cannot tell a healthy loop from one that has never ticked, or
+                # from a task killed by something `except Exception` doesn't
+                # catch — and DEPLOY.md sends the operator here to decide.
+                self._last_tick_at = time.time()
+
+    def _note_success(self) -> None:
+        """End a streak only once the loop has earned it — see `RECOVERY_TICKS`."""
+        if not self._failures:
+            return
+        self._clean_ticks += 1
+        if self._clean_ticks >= RECOVERY_TICKS:
+            self._failures = 0
+            self._clean_ticks = 0
+            self._failure_since = None
+            self._failure_error = None
+
+    def _note_failure(self, exc: Exception) -> None:
+        """Survive the tick, but stop being quiet about it.
+
+        Catching everything is right — a watchdog that dies on one bad frame
+        protects nothing. Catching everything *silently* is how the watchdog
+        itself becomes the outage nobody notices. So the streak is counted, it
+        surfaces on `/api/alerts` (the endpoint DEPLOY.md tells the operator to
+        curl), and the log escalates instead of repeating one traceback a minute
+        until the disk is full. The count is of failures, not of *consecutive*
+        failures: a tick that only breaks while some condition is firing would
+        otherwise never build a streak, and that is the shape the unreadable
+        state file took for three of the four rules.
+        """
+        self._failures += 1
+        self._clean_ticks = 0
+        self._failure_error = describe(exc)
+        if self._failure_since is None:
+            self._failure_since = time.time()
+        if self._failures == 1:
+            _LOG.exception("alert tick failed (non-fatal)")
+        elif self._failures == FAILURE_ALARM_AFTER:
+            _LOG.critical(
+                "alert tick has failed %d times running (%s) — nothing is watching the spa",
+                self._failures,
+                self._failure_error,
+            )
+        elif self._failures % 60 == 0:
+            _LOG.critical(
+                "alert tick still failing after %d attempts (%s)",
+                self._failures,
+                self._failure_error,
+            )
 
     # -- the tick -------------------------------------------------------------
     async def tick(self, now: float | None = None) -> dict[str, dict]:
@@ -369,6 +476,20 @@ class AlertMonitor:
     def snapshot(self) -> dict:
         return {
             "config": vars(self.config),
+            # `failing` alone proves nothing: it is also None before the first
+            # tick, and on a loop whose task is gone. Read it next to `alive`
+            # and the age of `last_tick_at`.
+            "alive": self._task is not None and not self._task.done(),
+            "last_tick_at": self._last_tick_at,
+            "failing": (
+                {
+                    "since": self._failure_since,
+                    "count": self._failures,
+                    "error": self._failure_error,
+                }
+                if self._failures
+                else None
+            ),
             "episodes": {
                 key: {
                     "since": episode["since"],
@@ -419,14 +540,14 @@ class AlertMonitor:
             return {}, None
         episodes = raw.get("episodes") if isinstance(raw.get("episodes"), dict) else raw
         witness = raw.get("last_ok_at")
-        return (
-            {
-                key: value
-                for key, value in episodes.items()
-                if isinstance(value, dict) and isinstance(value.get("since"), (int, float))
-            },
-            witness if isinstance(witness, (int, float)) else None,
-        )
+        loaded = {}
+        for key, value in episodes.items():
+            episode = _episode_from(value)
+            if episode is None:
+                _LOG.warning("dropping unreadable alert episode %r", key)
+            else:
+                loaded[key] = episode
+        return loaded, _stamp(witness)
 
     def _save(self) -> None:
         if self.state_path is None:

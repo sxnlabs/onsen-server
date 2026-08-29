@@ -121,7 +121,18 @@ JAR=$(mktemp)
 curl -s -c "$JAR" -o /dev/null -X POST http://127.0.0.1:8731/login \
   --data-urlencode "password=$(grep '^HERMES_PASSWORD=' .env | cut -d= -f2-)"
 curl -s -b "$JAR" http://127.0.0.1:8731/api/alerts; rm -f "$JAR"
-# {"enabled":true,"config":{...},"episodes":{}}   <- enabled:true means recipient AND OVH keys are present
+# {"enabled":true,"config":{...},"episodes":{},"alive":true,"last_tick_at":…,"failing":null}
+#   enabled:true  -> recipient AND OVH keys are present
+#   alive + last_tick_at -> the watchdog is *running*. Read them first: an
+#                    unstarted loop and one killed outright both report
+#                    failing:null, so a null there is not on its own good news.
+#                    last_tick_at is null until the first tick (one interval
+#                    after start); older than a couple of intervals = nobody home.
+#   failing       -> null, or a run of failed ticks with its count, first
+#                    occurrence and error. Non-null means the process is up but
+#                    not watching the spa: treat it as an outage of the alerting
+#                    itself. It clears only after five clean ticks, so a fault
+#                    that comes and goes stays visible.
 
 docker compose logs onsen | grep -i "half-configured"   # any hit = armed in name only
 ```
