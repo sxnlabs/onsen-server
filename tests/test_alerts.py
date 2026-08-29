@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import time
 
 from intex_spa.alerts import (
     ERROR_CODE,
+    FAILURE_ALARM_AFTER,
+    RECOVERY_TICKS,
     HEATING_STALLED,
     UNREACHABLE,
     WATER_LOW,
@@ -483,6 +488,242 @@ def test_resolution_wording_claims_only_what_was_observed():
     assert "28C" in resolution_message(WATER_LOW, cooled)
 
 
+# -- a state file we didn't write ----------------------------------------------
+
+
+async def test_an_episode_missing_notified_at_does_not_kill_the_tick(tmp_path):
+    """The silent death this module exists to prevent, turned on itself: a
+    truncated or hand-edited alerts.json used to raise KeyError on every tick,
+    and `_loop` logged it as non-fatal forever. The watchdog was dead and the
+    only trace was a log line nobody reads."""
+    (tmp_path / "alerts.json").write_text(
+        json.dumps({"episodes": {UNREACHABLE: {"since": NOW - 7200}}, "last_ok_at": NOW - 7200})
+    )
+    sender = FakeSender()
+    watchdog = monitor(tmp_path, sender)
+
+    await watchdog.tick(now=NOW)
+
+    # Nothing was ever texted about this episode, so it still owes its SMS.
+    assert len(sender.sent) == 1 and "injoignable" in sender.sent[0]
+
+
+async def test_entries_that_are_not_episodes_are_dropped_not_carried(tmp_path):
+    (tmp_path / "alerts.json").write_text(
+        json.dumps(
+            {
+                "episodes": {
+                    UNREACHABLE: {"since": NOW - 7200, "notified_at": NOW - 7000},
+                    ERROR_CODE: {"since": "hier"},
+                    WATER_LOW: "cold",
+                    HEATING_STALLED: {"notified_at": NOW},
+                }
+            }
+        )
+    )
+    watchdog = monitor(tmp_path, FakeSender())
+    assert set(watchdog.snapshot()["episodes"]) == {UNREACHABLE}
+
+
+async def test_a_junk_timestamp_does_not_become_an_episode_from_1970(tmp_path):
+    """`isinstance(True, int)` is True, and float(True) is 1.0 — an epoch in
+    January 1970, which would read as a 56-year outage."""
+    (tmp_path / "alerts.json").write_text(
+        json.dumps({"episodes": {UNREACHABLE: {"since": True, "notified_at": "oui"}}})
+    )
+    watchdog = monitor(tmp_path, FakeSender())
+    assert watchdog.snapshot()["episodes"] == {}
+
+
+async def test_a_repeated_tick_failure_stops_being_invisible(tmp_path):
+    """`_loop` must keep the watchdog alive without hiding that it is broken:
+    what it swallows has to show up on /api/alerts, which is what DEPLOY.md
+    tells the operator to curl."""
+    watchdog = monitor(tmp_path, FakeSender())
+    assert watchdog.snapshot()["failing"] is None
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("history is on fire")
+
+    watchdog.tick = boom
+    watchdog.interval = 0
+    task = asyncio.create_task(watchdog._loop())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if (watchdog.snapshot()["failing"] or {}).get("count", 0) >= 2:
+            break
+    task.cancel()
+
+    failing = watchdog.snapshot()["failing"]
+    assert failing["count"] >= 2
+    assert "history is on fire" in failing["error"]
+
+
+async def _spin(watchdog, tick, until, limit=4000):
+    """Run `_loop` with no sleep until `until()` holds, then stop it."""
+    watchdog.tick = tick
+    watchdog.interval = 0
+    task = asyncio.create_task(watchdog._loop())
+    for _ in range(limit):
+        await asyncio.sleep(0)
+        if until():
+            break
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def test_a_fault_that_comes_and_goes_still_reaches_the_alarm(tmp_path):
+    """The bug this counter exists for is reached only while a condition fires,
+    and three of the four rules come and go. Counting *consecutive* failures
+    would cap the streak at one forever: the alarm would never sound and
+    /api/alerts would read healthy every other minute."""
+    watchdog = monitor(tmp_path, FakeSender())
+    calls = {"n": 0}
+
+    async def every_other(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] % 2:
+            raise RuntimeError("history is on fire")
+        return {}
+
+    await _spin(
+        watchdog,
+        every_other,
+        lambda: (watchdog.snapshot()["failing"] or {}).get("count", 0) >= FAILURE_ALARM_AFTER,
+    )
+    failing = watchdog.snapshot()["failing"]
+    assert failing["count"] >= FAILURE_ALARM_AFTER
+    assert "history is on fire" in failing["error"]
+
+
+def test_a_streak_clears_only_after_a_sustained_clean_run(tmp_path):
+    watchdog = monitor(tmp_path, FakeSender())
+    watchdog._note_failure(RuntimeError("boom"))
+    for _ in range(RECOVERY_TICKS - 1):
+        watchdog._note_success()
+        assert watchdog.snapshot()["failing"] is not None  # one good tick proves nothing
+
+    watchdog._note_success()
+    assert watchdog.snapshot()["failing"] is None
+
+    # And the next failure dates from itself, not from the one already resolved:
+    # DEPLOY.md tells the operator to read that age as the length of an outage.
+    before = time.time()
+    watchdog._note_failure(RuntimeError("encore"))
+    failing = watchdog.snapshot()["failing"]
+    assert failing["count"] == 1
+    assert failing["since"] >= before
+    assert failing["error"].endswith("encore")
+
+
+async def test_the_loop_clears_its_own_streak_once_it_recovers(tmp_path):
+    """Same contract, through `_loop` rather than by hand."""
+    watchdog = monitor(tmp_path, FakeSender())
+    calls = {"n": 0}
+
+    async def once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return {}
+
+    await _spin(watchdog, once, lambda: calls["n"] > RECOVERY_TICKS)
+    assert watchdog.snapshot()["failing"] is None
+
+
+async def test_the_snapshot_carries_proof_of_life(tmp_path):
+    """`failing: null` is also what a loop that never started looks like, and
+    what one killed by a BaseException looks like. DEPLOY.md sends the operator
+    to this endpoint to decide whether anything is watching."""
+    watchdog = monitor(tmp_path, FakeSender())
+    assert watchdog.snapshot()["alive"] is False
+    assert watchdog.snapshot()["last_tick_at"] is None
+
+    watchdog.interval = 0
+    await watchdog.start()
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if watchdog.snapshot()["last_tick_at"] is not None:
+            break
+    assert watchdog.snapshot()["alive"] is True
+    assert watchdog.snapshot()["last_tick_at"] is not None
+
+    await watchdog.stop()
+    assert watchdog.snapshot()["alive"] is False
+
+
+def test_the_log_escalates_rather_than_repeating_one_traceback_a_minute(tmp_path, caplog):
+    """Non-fatal is a claim with an expiry date. Once the streak holds, the line
+    has to say the watchdog is not watching — and then shut up until it's worth
+    saying again."""
+    watchdog = monitor(tmp_path, FakeSender())
+    with caplog.at_level(logging.CRITICAL, logger="intex_spa.alerts"):
+        for _ in range(FAILURE_ALARM_AFTER):
+            watchdog._note_failure(RuntimeError("history is on fire"))
+        assert [r.getMessage() for r in caplog.records] == [
+            f"alert tick has failed {FAILURE_ALARM_AFTER} times running "
+            "(RuntimeError: history is on fire) — nothing is watching the spa"
+        ]
+
+        caplog.clear()
+        for _ in range(60 - FAILURE_ALARM_AFTER):
+            watchdog._note_failure(RuntimeError("history is on fire"))
+        assert [r.getMessage() for r in caplog.records] == [
+            "alert tick still failing after 60 attempts (RuntimeError: history is on fire)"
+        ]
+
+
+async def test_the_fault_code_survives_a_restart(tmp_path):
+    """E90 texted, redeploy, spa now says E94. Without `code` reloaded off disk
+    the new episode looks like the same fault, and the `notified_at` it carries
+    swallows the worse diagnosis."""
+    sender = FakeSender()
+    config = AlertConfig(error_code_after=0)
+    watchdog = monitor(
+        tmp_path, sender, online=True, status=dict(OK, error_code="E90"),
+        last_ok_at=NOW, config=config,
+    )
+    await watchdog.tick(now=NOW)
+    assert len(sender.sent) == 1 and "E90" in sender.sent[0]
+
+    restarted = monitor(
+        tmp_path, sender, online=True, status=dict(OK, error_code="E94"),
+        last_ok_at=NOW, config=config,
+    )
+    await restarted.tick(now=NOW + 60)
+    assert len(sender.sent) == 2 and "E94" in sender.sent[1]
+
+
+async def test_a_pending_resolution_survives_a_restart(tmp_path):
+    """A resolution owed but not yet sent must still be owed after a redeploy."""
+    sender = FakeSender()
+    watchdog = monitor(tmp_path, sender)
+    await watchdog.tick(now=NOW)
+
+    sender.ok = False
+    watchdog.supervisor.state["online"] = True
+    watchdog.supervisor.last_ok_at = NOW + 60
+    await watchdog.tick(now=NOW + 60)
+    assert watchdog.snapshot()["episodes"][UNREACHABLE]["clearing"] is True
+
+    restarted = monitor(tmp_path, sender, online=True, last_ok_at=NOW + 60)
+    assert restarted.snapshot()["episodes"][UNREACHABLE]["clearing"] is True
+
+
+def test_the_witness_is_a_timestamp_or_nothing(tmp_path):
+    """`float(True)` is 1.0 — January 1970 — and the witness dates the outage:
+    it would text "spa injoignable depuis 499999h59"."""
+    (tmp_path / "alerts.json").write_text(
+        json.dumps({"episodes": {}, "last_ok_at": NOW - 7200})
+    )
+    assert monitor(tmp_path, FakeSender(), last_ok_at=None)._last_ok_at([]) == NOW - 7200
+
+    (tmp_path / "alerts.json").write_text(json.dumps({"episodes": {}, "last_ok_at": True}))
+    watchdog = monitor(tmp_path, FakeSender(), last_ok_at=None)
+    assert watchdog._last_ok_at([]) == watchdog.started_at
 async def test_disabling_a_rule_drops_its_episode_instead_of_clearing_it(tmp_path):
     """Turning the water floor off is not an observation. The owner who silenced
     it because of the cost must not get one last "alerte eau basse levee"."""
