@@ -862,6 +862,36 @@ def _configured_io_threads() -> int:
     return max(1, value)
 
 
+_UNSET = object()
+
+
+def _alert_number(env: dict, key: str, default, *, off=_UNSET):
+    """One alerting threshold, read so it can never take the app down.
+
+    `make_app()` builds the spa supervisor as well as the watchdog, so a typo in
+    an optional alerting knob must not be what stops the spa from being driven:
+    an unparseable value falls back to `default` and says so in the log, rather
+    than raising out of the uvicorn factory into a restart loop that would leave
+    the spa unmanaged *and* mute — this process is the one that sends the SMS.
+
+    "off", "none" and "0" all resolve to `off`, which for the two rules that can
+    be switched off is the value that disables them; elsewhere it is `default`,
+    because the outage alarm is the whole reason this module exists.
+    """
+    if off is _UNSET:
+        off = default
+    raw = (env.get(key) or "").strip()
+    if not raw:
+        return default
+    if raw.lower() in ("off", "none", "0"):
+        return off
+    try:
+        return float(raw)
+    except ValueError:
+        _ALERT_LOG.error("%s=%r is not a number — falling back to %r", key, raw, default)
+        return default
+
+
 def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
     """Build the SMS sender from the environment, or None when not configured.
 
@@ -879,11 +909,15 @@ def _configured_alerting() -> tuple[SmsSender | None, AlertConfig]:
         )
     sender = SmsSender(credentials, recipient) if (recipient and credentials) else None
 
-    floor = (env.get("ONSEN_ALERT_WATER_LOW_C") or "").strip().lower()
     config = AlertConfig(
-        unreachable_after=float(env.get("ONSEN_ALERT_UNREACHABLE_AFTER") or 3600),
-        water_low_c=None if floor in ("off", "none", "0") else float(floor or 30.0),
-        heating_stall_hours=float(env.get("ONSEN_ALERT_HEATING_STALL_HOURS") or 2),
+        unreachable_after=_alert_number(env, "ONSEN_ALERT_UNREACHABLE_AFTER", 3600.0),
+        # Unset means off, not 30C: a spa climbing from 29C to its 37C setpoint
+        # is a cold start, and texting one every time buried the alerts that
+        # matter. Set a temperature to arm it as a freeze warning.
+        water_low_c=_alert_number(env, "ONSEN_ALERT_WATER_LOW_C", None, off=None),
+        # A zero-length window is how the stall rule switches off; "off" gets
+        # there too, because that's the word the floor taught the operator.
+        heating_stall_hours=_alert_number(env, "ONSEN_ALERT_HEATING_STALL_HOURS", 2.0, off=0.0),
     )
     return sender, config
 

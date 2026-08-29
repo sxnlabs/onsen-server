@@ -20,6 +20,11 @@ Two deliberate choices:
 - **Offline suppresses the spa-side rules.** When the spa is unreachable its
   last status is stale by definition; reporting "water at 32C" off a two-day-old
   frame would be a lie, and would bury the one alert that matters.
+- **Only faults text.** SMS cost real money, so a text has to mean something is
+  broken: the spa is gone, the spa says it's broken, or the heater is running
+  for nothing. The water floor is none of those — a spa at 29C climbing to 37C
+  is a normal cold start, and the rule fired on every one of them. It's kept,
+  off by default, for anyone who wants a freeze warning (`water_low_c`).
 """
 
 from __future__ import annotations
@@ -45,7 +50,9 @@ class AlertConfig:
 
     unreachable_after: float = 3600.0      # 1h — absorbs a host reboot or a wifi blip
     error_code_after: float = 300.0        # 5 min — E90 can clear on its own
-    water_low_c: float | None = 30.0       # None disables the floor check
+    # Off by default: not a fault, just a cold spa. Set a temperature to arm it
+    # (a freeze warning is the use case) — 30.0 was the old always-on value.
+    water_low_c: float | None = None
     water_low_after: float = 900.0
     heating_stall_hours: float = 2.0       # window over which heat must produce a rise
     heating_stall_min_rise: float = 1.0    # degrees C
@@ -67,6 +74,20 @@ class AlertConfig:
         if key == WATER_LOW:
             return self.water_low_after
         return 0.0
+
+    def disabled_keys(self) -> set[str]:
+        """Rules this config switches off entirely.
+
+        `AlertMonitor` drops their open episodes at load rather than letting
+        them clear: turning a rule off is not an observation, and the owner who
+        just silenced the water floor should not get one last "alerte levee".
+        """
+        disabled = set()
+        if self.water_low_c is None:
+            disabled.add(WATER_LOW)
+        if self.heating_stall_hours <= 0:
+            disabled.add(HEATING_STALLED)
+        return disabled
 
 
 def _hhmm(ts: float) -> str:
@@ -257,6 +278,16 @@ class AlertMonitor:
         self.interval = interval
         self.started_at = time.time()
         self._episodes, self._last_ok_witness = self._load()
+        # Persist the purge immediately. Leaving it in memory only would let the
+        # episode outlive a restart on disk, and a floor armed again months later
+        # (a freeze warning, say) would reload it: `evaluate()` wouldn't fire it,
+        # the clearing branch would text "alerte eau basse levee" out of nowhere,
+        # and the `notified_at` it carries would swallow the first real one.
+        stale = self.config.disabled_keys() & self._episodes.keys()
+        if stale:
+            for key in stale:
+                self._episodes.pop(key)
+            self._save()
         self._task: asyncio.Task | None = None
 
     # -- lifecycle ------------------------------------------------------------

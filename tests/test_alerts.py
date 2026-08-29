@@ -105,28 +105,32 @@ def test_error_code_is_reported_with_its_code():
     assert "E90" in firing[ERROR_CODE]
 
 
+ARMED_FLOOR = AlertConfig(water_low_c=30.0)  # the floor is opt-in; arm it to test it
+
+
 def test_water_below_the_floor_fires_only_when_the_setpoint_is_higher():
     cold = {"current_temp": 28, "preset_temp": 37, "heater": False, "error_code": None}
     firing = evaluate(
-        online=True, status=cold, last_ok_at=NOW, samples=[], config=AlertConfig(), now=NOW
+        online=True, status=cold, last_ok_at=NOW, samples=[], config=ARMED_FLOOR, now=NOW
     )
     assert WATER_LOW in firing
 
     # Same temperature, but that's what was asked for: nothing is wrong.
     resting = {"current_temp": 28, "preset_temp": 25, "heater": False, "error_code": None}
     firing = evaluate(
-        online=True, status=resting, last_ok_at=NOW, samples=[], config=AlertConfig(), now=NOW
+        online=True, status=resting, last_ok_at=NOW, samples=[], config=ARMED_FLOOR, now=NOW
     )
     assert WATER_LOW not in firing
 
 
-def test_water_floor_can_be_disabled():
-    cold = {"current_temp": 12, "preset_temp": 37, "heater": False, "error_code": None}
+def test_water_floor_is_off_by_default():
+    """A spa climbing from 29C to 37C is a cold start, not an incident: only the
+    three fault rules are allowed to spend an SMS."""
+    cold = {"current_temp": 29, "preset_temp": 37, "heater": True, "error_code": None}
     firing = evaluate(
-        online=True, status=cold, last_ok_at=NOW, samples=[],
-        config=AlertConfig(water_low_c=None), now=NOW,
+        online=True, status=cold, last_ok_at=NOW, samples=[], config=AlertConfig(), now=NOW
     )
-    assert WATER_LOW not in firing
+    assert firing == {}
 
 
 def test_two_hours_of_heat_without_a_rise_is_a_stall():
@@ -410,7 +414,9 @@ async def test_an_interrupted_debounce_starts_over(tmp_path):
     when it comes back the condition has not persisted — the clock restarts."""
     sender = FakeSender()
     cold = {"current_temp": 28, "preset_temp": 37, "heater": True, "error_code": None}
-    watchdog = monitor(tmp_path, sender, online=True, status=cold, last_ok_at=NOW)
+    watchdog = monitor(
+        tmp_path, sender, online=True, status=cold, last_ok_at=NOW, config=ARMED_FLOOR
+    )
     await watchdog.tick(now=NOW)
     assert watchdog.snapshot()["episodes"][WATER_LOW]["notified"] is False
 
@@ -475,3 +481,98 @@ def test_resolution_wording_claims_only_what_was_observed():
     assert "repart" not in resolution_message(HEATING_STALLED, cooled)
     assert "au-dessus" not in resolution_message(WATER_LOW, cooled)
     assert "28C" in resolution_message(WATER_LOW, cooled)
+
+
+async def test_disabling_a_rule_drops_its_episode_instead_of_clearing_it(tmp_path):
+    """Turning the water floor off is not an observation. The owner who silenced
+    it because of the cost must not get one last "alerte eau basse levee"."""
+    sender = FakeSender()
+    cold = {"current_temp": 28, "preset_temp": 37, "heater": True, "error_code": None}
+    watchdog = monitor(
+        tmp_path, sender, online=True, status=cold, last_ok_at=NOW,
+        config=AlertConfig(water_low_c=30.0, water_low_after=0),
+    )
+    await watchdog.tick(now=NOW)
+    assert len(sender.sent) == 1 and "seuil" in sender.sent[0]
+
+    assert WATER_LOW in json.loads((tmp_path / "alerts.json").read_text())["episodes"]
+
+    # Same state file, floor now off.
+    restarted = monitor(tmp_path, sender, online=True, status=cold, last_ok_at=NOW)
+    assert restarted.snapshot()["episodes"] == {}
+    await restarted.tick(now=NOW + 60)
+    assert len(sender.sent) == 1
+    # And it's gone from disk, not just from memory: an episode that outlived the
+    # purge would be reloaded the day the floor is armed again — texting a
+    # resolution nobody asked for, then swallowing the first real freeze alert.
+    assert json.loads((tmp_path / "alerts.json").read_text())["episodes"] == {}
+
+    rearmed = monitor(
+        tmp_path, sender, online=True, status=cold, last_ok_at=NOW, config=ARMED_FLOOR
+    )
+    await rearmed.tick(now=NOW + 120)
+    assert len(sender.sent) == 1  # a fresh debounce, not a stale episode
+    assert rearmed.snapshot()["episodes"][WATER_LOW]["notified"] is False
+
+
+def test_disabled_keys_covers_every_rule_a_config_can_switch_off():
+    """Both off switches the env exposes: an unset floor, and a zero-hour stall
+    window (`ONSEN_ALERT_HEATING_STALL_HOURS=0`)."""
+    assert AlertConfig().disabled_keys() == {WATER_LOW}
+    assert AlertConfig(water_low_c=30.0).disabled_keys() == set()
+    assert AlertConfig(heating_stall_hours=0).disabled_keys() == {WATER_LOW, HEATING_STALLED}
+
+
+def _alert_config(monkeypatch):
+    """Resolve AlertConfig the way make_app() does, off a given environment."""
+    from web import main as web_main
+
+    def configured(**env):
+        monkeypatch.setattr(web_main, "alerting_env", lambda: env)
+        return web_main._configured_alerting()[1]
+
+    return configured
+
+
+def test_the_env_arms_the_water_floor_only_when_it_names_a_temperature(monkeypatch):
+    """Unset means off, so a deployment that never set the variable stops texting
+    cold starts on its own. One that *does* still name 30 keeps the old noise —
+    that line has to be deleted by hand (DEPLOY.md says so)."""
+    config = _alert_config(monkeypatch)
+
+    assert config().water_low_c is None
+    assert config(ONSEN_ALERT_WATER_LOW_C="").water_low_c is None
+    assert config(ONSEN_ALERT_WATER_LOW_C="OFF").water_low_c is None
+    assert config(ONSEN_ALERT_WATER_LOW_C="0").water_low_c is None
+    assert config(ONSEN_ALERT_WATER_LOW_C=" 5 ").water_low_c == 5.0
+    assert config(ONSEN_ALERT_WATER_LOW_C="30").water_low_c == 30.0  # still armed
+    # The three fault rules keep their thresholds.
+    assert config().unreachable_after == 3600.0
+    assert config().heating_stall_hours == 2.0
+
+
+def test_a_bad_alerting_value_never_takes_the_spa_down(monkeypatch):
+    """`make_app()` builds the supervisor too. A typo in an optional threshold
+    that raised out of the factory would leave the spa unmanaged *and* mute —
+    and "off" is a word the docs teach for the floor, so the stall window has to
+    survive it as well."""
+    config = _alert_config(monkeypatch)
+
+    assert config(ONSEN_ALERT_HEATING_STALL_HOURS="off").heating_stall_hours == 0
+    assert config(ONSEN_ALERT_HEATING_STALL_HOURS="deux").heating_stall_hours == 2.0
+    assert config(ONSEN_ALERT_WATER_LOW_C="froid").water_low_c is None
+    assert config(ONSEN_ALERT_UNREACHABLE_AFTER="une heure").unreachable_after == 3600.0
+    # An off switch for the outage alarm is not on offer: that's the 46h incident.
+    assert config(ONSEN_ALERT_UNREACHABLE_AFTER="off").unreachable_after == 3600.0
+    assert config(ONSEN_ALERT_UNREACHABLE_AFTER="60").unreachable_after == 60.0
+
+
+def test_a_zero_hour_stall_window_disables_the_stall_rule():
+    """What `ONSEN_ALERT_HEATING_STALL_HOURS=0` buys, end to end."""
+    config = AlertConfig(heating_stall_hours=0)
+    firing = evaluate(
+        online=True, status=OK, last_ok_at=NOW,
+        samples=heating_samples(hours=2, rise=0), config=config, now=NOW,
+    )
+    assert firing == {}
+    assert config.disabled_keys() == {WATER_LOW, HEATING_STALLED}
