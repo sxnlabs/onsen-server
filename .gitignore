@@ -11,3 +11,4 @@ server/state/
 # Docker deployment secrets — never commit the real values.
 .env
 wireguard/wg0.conf
+.coverage
